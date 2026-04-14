@@ -1,0 +1,39 @@
+export default function ResultsPanel({ result, histogramB64 }) {
+  if (!result) return null
+
+  const { nclusters, background_median, summary } = result
+
+  return (
+    <div className="results-panel">
+      <h3>Results</h3>
+      <div className="metrics">
+        <Metric label="Particles" value={nclusters} />
+        <Metric label="Background median" value={background_median?.toFixed(1)} />
+        {summary && (
+          <>
+            <Metric label="Mean diameter" value={`${summary.diameter_mean_mm?.toFixed(2)} mm`} />
+            <Metric label="Std dev" value={`${summary.diameter_std_mm?.toFixed(2)} mm`} />
+            <Metric label="Surface quality" value={summary.surface_quality?.toFixed(2)} />
+            <Metric label="Efficiency" value={`${summary.average_efficiency_pct?.toFixed(1)}%`} />
+          </>
+        )}
+      </div>
+
+      {histogramB64 && (
+        <div className="histogram">
+          <h4>Histogram</h4>
+          <img className="histogram-image" src={`data:image/png;base64,${histogramB64}`} alt="Histogram" />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Metric({ label, value }) {
+  return (
+    <div className="metric">
+      <span className="metric-label">{label}</span>
+      <span className="metric-value">{value ?? '—'}</span>
+    </div>
+  )
+}

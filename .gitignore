@@ -1,0 +1,15 @@
+*.csv
+*.xlsx
+*.xls
+*.ipynb
+__pycache__/
+*.pyc
+*.pyo
+espresso_dashboard/
+React/node_modules/
+React copy/node_modules/
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.log

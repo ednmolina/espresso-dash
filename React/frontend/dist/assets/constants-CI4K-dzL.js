@@ -1,0 +1,1 @@
+const e={"US Quarter":24.26,"US Dime":17.91,"US Nickel":21.21,"US Penny":19.05,"Euro 1":23.25,"Euro 2":25.75,"Euro 0.50":24.25},s={threshold_percent:58.8,reference_threshold:.4,max_cost:.35,max_cluster_axis:100,min_surface:5,min_roundness:0,quick_mode:!1,analysis_scale_pct:100},r="/api";export{r as A,s as D,e as R};
