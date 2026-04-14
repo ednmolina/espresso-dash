@@ -496,7 +496,7 @@ export default function AnalyzerApp({ user }) {
               </button>
             )}
             {savedRuns.length > 0 && (
-              <button onClick={() => { setSavedRuns([]); setCompareHistogram(null); setCompareStats(null) }} disabled={busy}>
+              <button onClick={() => { setSavedRuns([]); setCompareHistogram(null); setCompareStats(null); setHistogramB64(null); setHistogramStats(null) }} disabled={busy}>
                 Clear Runs
               </button>
             )}
