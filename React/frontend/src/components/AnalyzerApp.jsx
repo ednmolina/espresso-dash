@@ -495,6 +495,11 @@ export default function AnalyzerApp({ user }) {
                 Save Run ({savedRuns.length}/3)
               </button>
             )}
+            {savedRuns.length > 0 && (
+              <button onClick={() => { setSavedRuns([]); setCompareHistogram(null); setCompareStats(null) }} disabled={busy}>
+                Clear Runs
+              </button>
+            )}
             {analysisResult && (
               <div className={`download-menu ${downloadsOpen ? 'open' : ''}`}>
                 <button type="button" onClick={() => setDownloadsOpen((prev) => !prev)}>
@@ -540,13 +545,10 @@ export default function AnalyzerApp({ user }) {
                     <td>{run.summary?.average_extraction_yield_pct?.toFixed(1) ?? '—'}</td>
                   </tr>
                 ))}
-                {savedRuns.length >= 2 && (() => {
-                  const means = savedRuns.map((r) => r.summary?.diameter_mean_mm).filter(Boolean)
+                {(() => {
+                  const means = savedRuns.map((r) => r.summary?.diameter_mean_mm).filter((v) => v != null && !isNaN(v))
+                  if (means.length < 2) return null
                   const avg = means.reduce((a, b) => a + b, 0) / means.length
-                  const sorted = [...means].sort((a, b) => a - b)
-                  const med = sorted.length % 2 === 0
-                    ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
-                    : sorted[Math.floor(sorted.length / 2)]
                   return (
                     <tr className="saved-runs-summary-row">
                       <td>Mean across runs</td>
