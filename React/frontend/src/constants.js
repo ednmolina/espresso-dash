@@ -19,4 +19,4 @@ export const DEFAULT_SETTINGS = {
   analysis_scale_pct: 100,
 }
 
-export const API = '/api'
+export const API = import.meta.env.VITE_API_BASE || '/api'

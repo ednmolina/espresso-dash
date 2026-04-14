@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { API } from '../../constants'
+import {
+  addShotToFirestore,
+  buildDashboardPayload,
+  buildExperimentPayload,
+  buildOriginsPayload,
+  buildRecommendationPayload,
+  getDashboardMeta,
+  loadShotsData,
+  updateShotCellInFirestore,
+} from '../../dashboardData'
 
 const TAB_OPTIONS = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -99,49 +108,40 @@ function suggestionListId(scope, field) {
   return `${scope}-${field}-suggestions`
 }
 
-async function fetchJson(path, options) {
-  const response = await fetch(`${API}${path}`, options)
-  const text = await response.text()
-  let data = null
-  if (text) {
-    try {
-      data = JSON.parse(text)
-    } catch {
-      if (!response.ok) {
-        throw new Error(text)
-      }
-      throw new Error(`Invalid JSON response from ${path}`)
-    }
-  }
-  if (!response.ok) {
-    throw new Error(data?.detail || text || 'Request failed')
-  }
-  return data
-}
-
 export default function DashboardApp() {
-  const [meta, setMeta] = useState(null)
-  const [dashboard, setDashboard] = useState(null)
-  const [origins, setOrigins] = useState(null)
-  const [experiment, setExperiment] = useState(null)
+  const [shotsState, setShotsState] = useState(null)
   const [activeTab, setActiveTab] = useState('dashboard')
   const [shotForm, setShotForm] = useState(buildShotForm(null))
   const [experimentForm, setExperimentForm] = useState(buildExperimentForm(null))
   const [originsFilters, setOriginsFilters] = useState(EMPTY_FILTERS)
   const [carryForward, setCarryForward] = useState(true)
   const [carryShot, setCarryShot] = useState(true)
-  const [recommendation, setRecommendation] = useState(null)
   const [booting, setBooting] = useState(true)
   const [savingShot, setSavingShot] = useState(false)
-  const [resetting, setResetting] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
-  const fieldOptions = dashboard?.field_options ?? {}
+  const meta = getDashboardMeta()
   const [ratingVisibility, setRatingVisibility] = useState({
     Bad: true,
     Good: true,
     Great: true,
   })
+
+  const dashboard = shotsState ? buildDashboardPayload(shotsState.shots) : null
+  const fieldOptions = dashboard?.field_options ?? {}
+  const recommendation = shotsState
+    ? buildRecommendationPayload(shotsState.shots, {
+      roaster: shotForm.roaster,
+      region: shotForm.region,
+      variety: shotForm.variety,
+      processing_technique: shotForm.processing_technique,
+      roast: shotForm.roast,
+      continent: shotForm.continent,
+    })
+    : null
+  const origins = shotsState ? buildOriginsPayload(shotsState.shots, originsFilters) : null
+  const experiment = shotsState ? buildExperimentPayload(shotsState.shots, experimentForm) : null
 
   useEffect(() => {
     let cancelled = false
@@ -150,28 +150,13 @@ export default function DashboardApp() {
       setBooting(true)
       setError('')
       try {
-        const [metaData, dashboardData, originsData, experimentData] = await Promise.all([
-          fetchJson('/espresso/meta'),
-          fetchJson('/espresso/dashboard'),
-          fetchJson('/espresso/origins', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(EMPTY_FILTERS),
-          }),
-          fetchJson('/espresso/experiment', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          }),
-        ])
+        const nextShotsState = await loadShotsData()
         if (cancelled) return
-        setMeta(metaData)
-        setDashboard(dashboardData)
-        setShotForm(buildShotForm(dashboardData.defaults))
-        setRecommendation(dashboardData.recommendation)
-        setOrigins(originsData)
-        setExperiment(experimentData)
-        setExperimentForm(buildExperimentForm(experimentData.defaults))
+        const nextDashboard = buildDashboardPayload(nextShotsState.shots)
+        const nextExperiment = buildExperimentPayload(nextShotsState.shots, {})
+        setShotsState(nextShotsState)
+        setShotForm(buildShotForm(nextDashboard.defaults))
+        setExperimentForm(buildExperimentForm(nextExperiment.defaults))
       } catch (err) {
         if (!cancelled) {
           setError(err.message)
@@ -189,72 +174,6 @@ export default function DashboardApp() {
     }
   }, [])
 
-  useEffect(() => {
-    if (!dashboard) return undefined
-    const timer = window.setTimeout(async () => {
-      try {
-        const nextRecommendation = await fetchJson('/espresso/recommendation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roaster: shotForm.roaster,
-            region: shotForm.region,
-            variety: shotForm.variety,
-            processing_technique: shotForm.processing_technique,
-            roast: shotForm.roast,
-            continent: shotForm.continent,
-          }),
-        })
-        setRecommendation(nextRecommendation)
-      } catch (err) {
-        setError(err.message)
-      }
-    }, 250)
-    return () => window.clearTimeout(timer)
-  }, [
-    dashboard,
-    shotForm.continent,
-    shotForm.processing_technique,
-    shotForm.region,
-    shotForm.roast,
-    shotForm.roaster,
-    shotForm.variety,
-  ])
-
-  useEffect(() => {
-    if (!dashboard) return undefined
-    const timer = window.setTimeout(async () => {
-      try {
-        const nextOrigins = await fetchJson('/espresso/origins', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(originsFilters),
-        })
-        setOrigins(nextOrigins)
-      } catch (err) {
-        setError(err.message)
-      }
-    }, 150)
-    return () => window.clearTimeout(timer)
-  }, [dashboard, originsFilters])
-
-  useEffect(() => {
-    if (!dashboard) return undefined
-    const timer = window.setTimeout(async () => {
-      try {
-        const nextExperiment = await fetchJson('/espresso/experiment', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(experimentForm),
-        })
-        setExperiment(nextExperiment)
-      } catch (err) {
-        setError(err.message)
-      }
-    }, 300)
-    return () => window.clearTimeout(timer)
-  }, [dashboard, experimentForm])
-
   const preview = (() => {
     const { adjustedTemp, factor } = calculateAdjustmentFactor(Number(shotForm.temp_c || 0))
     const tds = calculateTds(Number(shotForm.brix || 0), factor)
@@ -265,43 +184,42 @@ export default function DashboardApp() {
   const filteredScatterPoints = (dashboard?.charts?.scatter_points ?? []).filter((row) => ratingVisibility[row['Rating Label']] ?? true)
   const filteredTrendPoints = (dashboard?.charts?.trend_points ?? []).filter((row) => ratingVisibility[row['Rating Label']] ?? true)
 
-  const refreshAfterMutation = async (dashboardData, message) => {
-    setDashboard(dashboardData)
-    setShotForm(buildShotForm(dashboardData.defaults))
-    setRecommendation(dashboardData.recommendation)
-    setNotice(message)
-    const [nextOrigins, nextExperiment] = await Promise.all([
-      fetchJson('/espresso/origins', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(originsFilters),
-      }),
-      fetchJson('/espresso/experiment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      }),
-    ])
-    setOrigins(nextOrigins)
-    setExperiment(nextExperiment)
-    setExperimentForm(buildExperimentForm(nextExperiment.defaults))
+  const refreshShots = async ({ message = '', resetShotForm = false, resetExperimentForm = false } = {}) => {
+    const nextShotsState = await loadShotsData()
+    const nextDashboard = buildDashboardPayload(nextShotsState.shots)
+    const nextExperiment = buildExperimentPayload(nextShotsState.shots, {})
+    setShotsState(nextShotsState)
+    if (resetShotForm) {
+      setShotForm(buildShotForm(nextDashboard.defaults))
+    }
+    if (resetExperimentForm) {
+      setExperimentForm(buildExperimentForm(nextExperiment.defaults))
+    }
+    if (message) {
+      setNotice(message)
+    }
   }
 
   const handleAddShot = async (event) => {
     event.preventDefault()
+    if (shotsState?.source !== 'firebase') {
+      setError('Offline mode is using cached data. Reconnect to Firebase before saving.')
+      return
+    }
     setSavingShot(true)
     setError('')
     try {
-      const dashboardData = await fetchJson('/espresso/shots', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          carry_forward: carryForward,
-          carry_shot: carryShot,
-          fields: shotForm,
-        }),
+      await addShotToFirestore({
+        shots: shotsState?.shots ?? [],
+        carryForward,
+        carryShot,
+        fields: shotForm,
       })
-      await refreshAfterMutation(dashboardData, 'Row added to editable CSV.')
+      await refreshShots({
+        message: 'Row added to Firestore.',
+        resetShotForm: true,
+        resetExperimentForm: true,
+      })
     } catch (err) {
       setError(err.message)
     } finally {
@@ -309,51 +227,31 @@ export default function DashboardApp() {
     }
   }
 
-  const handleResetWorkingCopy = async () => {
-    setResetting(true)
+  const handleRefreshData = async () => {
+    setRefreshing(true)
     setError('')
     try {
-      const dashboardData = await fetchJson('/espresso/reset', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      })
-      await refreshAfterMutation(dashboardData, 'Editable CSV reset from original source.')
+      await refreshShots({ message: 'Reloaded dashboard data.' })
     } catch (err) {
       setError(err.message)
     } finally {
-      setResetting(false)
+      setRefreshing(false)
     }
   }
 
   const handleCellUpdate = async (rowId, column, value) => {
+    if (shotsState?.source !== 'firebase') {
+      setError('Offline mode is using cached data. Reconnect to Firebase before editing.')
+      return
+    }
     setError('')
-    const dashboardData = await fetchJson('/espresso/cell', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        row_id: rowId,
-        column,
-        value,
-      }),
+    await updateShotCellInFirestore({
+      shots: shotsState?.shots ?? [],
+      rowId,
+      column,
+      value,
     })
-    setDashboard(dashboardData)
-    setRecommendation(dashboardData.recommendation)
-    setNotice(`Updated ${column} in editable CSV.`)
-    const [nextOrigins, nextExperiment] = await Promise.all([
-      fetchJson('/espresso/origins', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(originsFilters),
-      }),
-      fetchJson('/espresso/experiment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(experimentForm),
-      }),
-    ])
-    setOrigins(nextOrigins)
-    setExperiment(nextExperiment)
+    await refreshShots({ message: `Updated ${column} in Firestore.` })
   }
 
   if (booting) {
@@ -371,13 +269,17 @@ export default function DashboardApp() {
           <p className="dashboard-kicker">Espresso Analysis</p>
           <h1>Shot dashboard in React</h1>
           <p className="dashboard-caption">
-            The app reads from the editable CSV copy so your original export stays untouched.
+            Firestore is the live data source. When it is unavailable, the dashboard falls back to the last cached snapshot in localStorage.
           </p>
-          <div className="dashboard-file-chip">Data file: Espresso Extraction TDS OrgCSV_editable.csv</div>
+          <div className={`dashboard-file-chip ${shotsState?.source === 'cache' ? 'warning' : ''}`}>
+            {shotsState?.source === 'cache'
+              ? `⚠️ Offline — showing cached data${shotsState?.lastSyncedAt ? ` from ${new Date(shotsState.lastSyncedAt).toLocaleString()}` : ''}`
+              : 'Live: Firebase'}
+          </div>
         </div>
         <div className="dashboard-hero-actions">
-          <button className="dashboard-secondary-button" onClick={handleResetWorkingCopy} disabled={resetting}>
-            {resetting ? 'Resetting...' : 'Reset Editable Copy'}
+          <button className="dashboard-secondary-button" onClick={handleRefreshData} disabled={refreshing}>
+            {refreshing ? 'Refreshing...' : 'Refresh Data'}
           </button>
         </div>
       </header>

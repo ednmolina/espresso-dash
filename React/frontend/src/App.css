@@ -78,6 +78,45 @@ textarea {
   flex-direction: column;
 }
 
+.auth-gate-shell {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.auth-gate-card {
+  width: min(100%, 460px);
+  padding: 30px;
+  border-radius: 28px;
+  background:
+    linear-gradient(135deg, rgba(255, 250, 241, 0.95), rgba(235, 219, 191, 0.85)),
+    radial-gradient(circle at top right, rgba(155, 77, 47, 0.12), transparent 40%);
+  border: 1px solid rgba(155, 77, 47, 0.16);
+  box-shadow: var(--shadow);
+}
+
+.auth-gate-card h1 {
+  font-size: 34px;
+  line-height: 1.02;
+}
+
+.auth-gate-copy {
+  margin-top: 10px;
+  color: var(--muted);
+}
+
+.auth-gate-button {
+  margin-top: 18px;
+}
+
+.auth-gate-error {
+  margin-top: 16px;
+  color: #8f2f26;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .workspace-header {
   display: flex;
   align-items: center;
@@ -108,6 +147,25 @@ textarea {
   gap: 8px;
 }
 
+.workspace-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.workspace-user-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: rgba(255, 250, 241, 0.68);
+  border: 1px solid rgba(120, 96, 74, 0.12);
+  color: var(--muted);
+}
+
 .workspace-switch {
   padding: 10px 16px;
   background: rgba(255, 250, 241, 0.7);
@@ -131,6 +189,10 @@ textarea {
 
 .workspace-panel.hidden {
   display: none;
+}
+
+.workspace-logout {
+  min-height: 40px;
 }
 
 .workspace-loading {
@@ -201,6 +263,12 @@ textarea {
   background: rgba(255, 255, 255, 0.55);
   color: var(--muted);
   border: 1px solid rgba(155, 77, 47, 0.14);
+}
+
+.dashboard-file-chip.warning {
+  background: rgba(255, 243, 222, 0.88);
+  color: #8f5a1f;
+  border-color: rgba(143, 90, 31, 0.24);
 }
 
 .dashboard-hero-actions {
@@ -1172,6 +1240,11 @@ textarea {
   .workspace-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .workspace-header-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .dashboard-tabbar {
