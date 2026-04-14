@@ -203,6 +203,20 @@ class HistogramRequest(BaseModel):
     bins: Optional[int] = None
 
 
+class RunRef(BaseModel):
+    image_id: str
+    removed_cluster_ids: list[int] = []
+    label: str = ""
+
+
+class HistogramCompareRequest(BaseModel):
+    runs: list[RunRef]
+    x_metric: str = "diameter"
+    weight_mode: str = "number"
+    x_log: bool = True
+    bins: Optional[int] = None
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -329,11 +343,38 @@ def erase(
     }
 
 
+def _add_stats_lines(ax, values: np.ndarray, x_log: bool, color: str = "#2c7bb6") -> dict:
+    """Add mean/median/±1σ lines to a histogram axes. Returns stats dict."""
+    mean_val = float(np.mean(values))
+    median_val = float(np.median(values))
+    std_val = float(np.std(values))
+
+    ax.axvline(mean_val, color=color, linestyle="--", linewidth=1.8,
+               label=f"Mean: {mean_val:.3f} mm")
+    ax.axvline(median_val, color="#d7191c", linestyle=":", linewidth=1.8,
+               label=f"Median: {median_val:.3f} mm")
+
+    if not x_log:
+        ax.axvspan(mean_val - std_val, mean_val + std_val,
+                   alpha=0.12, color=color, label=f"±1σ: {std_val:.3f} mm")
+    else:
+        ax.axvline(max(mean_val - std_val, 1e-9), color=color,
+                   linestyle="-", linewidth=0.8, alpha=0.5)
+        ax.axvline(mean_val + std_val, color=color,
+                   linestyle="-", linewidth=0.8, alpha=0.5, label=f"±1σ: {std_val:.3f} mm")
+
+    ax.legend(fontsize=8)
+    return {"mean": mean_val, "median": median_val, "std": std_val}
+
+
 @app.post("/histogram")
 def histogram(
     req: HistogramRequest,
     authorization: Optional[str] = Header(None),
 ):
+    import matplotlib.pyplot as plt
+    from coffeegrindsize_core import metric_values as _metric_values
+
     _verify_token(authorization)
     result = _load_result(req.image_id)
     if result is None:
@@ -343,18 +384,71 @@ def histogram(
     if dataset.nclusters == 0 or dataset.pixel_scale is None:
         raise HTTPException(status_code=400, detail="No particles or no pixel scale set.")
 
-    figure, _ = plot_histogram(
-        [dataset],
-        HistogramSettings(
-            x_metric=req.x_metric,
-            weight_mode=req.weight_mode,
-            x_log=req.x_log,
-            bins=req.bins,
-        ),
+    settings = HistogramSettings(
+        x_metric=req.x_metric, weight_mode=req.weight_mode,
+        x_log=req.x_log, bins=req.bins,
     )
+    figure, _ = plot_histogram([dataset], settings)
+    values = _metric_values(dataset, req.x_metric)
+    stats = _add_stats_lines(figure.axes[0], values, req.x_log)
+
     buf = io.BytesIO()
     figure.savefig(buf, format="png", bbox_inches="tight")
-    import matplotlib.pyplot as plt
     plt.close(figure)
 
-    return {"histogram_b64": base64.b64encode(buf.getvalue()).decode()}
+    return {
+        "histogram_b64": base64.b64encode(buf.getvalue()).decode(),
+        **stats,
+    }
+
+
+@app.post("/histogram/compare")
+def histogram_compare(
+    req: HistogramCompareRequest,
+    authorization: Optional[str] = Header(None),
+):
+    import matplotlib.pyplot as plt
+    from coffeegrindsize_core import metric_values as _metric_values
+
+    _verify_token(authorization)
+    datasets = []
+    for run in req.runs:
+        result = _load_result(run.image_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"No analysis found for image {run.image_id}.")
+        ds = filter_dataset_by_cluster_ids(result.dataset, set(run.removed_cluster_ids))
+        if ds.nclusters == 0 or ds.pixel_scale is None:
+            raise HTTPException(status_code=400, detail=f"Run '{run.label}' has no particles or no scale.")
+        ds.label = run.label or f"Run {len(datasets) + 1}"
+        datasets.append(ds)
+
+    settings = HistogramSettings(
+        x_metric=req.x_metric, weight_mode=req.weight_mode,
+        x_log=req.x_log, bins=req.bins,
+    )
+    figure, _ = plot_histogram(datasets, settings)
+
+    colors = ["#2c7bb6", "#2f7d4a", "#9c5a14"]
+    per_run_stats = []
+    for i, (ds, color) in enumerate(zip(datasets, colors)):
+        values = _metric_values(ds, req.x_metric)
+        stats = _add_stats_lines(figure.axes[0], values, req.x_log, color=color)
+        per_run_stats.append({"label": ds.label, **stats})
+
+    all_means = [s["mean"] for s in per_run_stats]
+    all_medians = [s["median"] for s in per_run_stats]
+    combined = {
+        "mean_of_means": float(np.mean(all_means)),
+        "median_of_medians": float(np.median(all_medians)),
+        "std_of_means": float(np.std(all_means)),
+    }
+
+    buf = io.BytesIO()
+    figure.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(figure)
+
+    return {
+        "histogram_b64": base64.b64encode(buf.getvalue()).decode(),
+        "per_run": per_run_stats,
+        "combined": combined,
+    }

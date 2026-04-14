@@ -60,6 +60,10 @@ export default function AnalyzerApp({ user }) {
   const [erasePoints, setErasePoints] = useState([])
   const [eraseRadius, setEraseRadius] = useState(20)
   const [histogramB64, setHistogramB64] = useState(null)
+  const [histogramStats, setHistogramStats] = useState(null)
+  const [savedRuns, setSavedRuns] = useState([])
+  const [compareHistogram, setCompareHistogram] = useState(null)
+  const [compareStats, setCompareStats] = useState(null)
   const [downloadsOpen, setDownloadsOpen] = useState(false)
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
@@ -234,8 +238,44 @@ export default function AnalyzerApp({ user }) {
       })
       const data = await res.json()
       setHistogramB64(data.histogram_b64)
+      setHistogramStats({ mean: data.mean, median: data.median, std: data.std })
     } catch (err) {
       setStatus(`Histogram failed: ${err.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveRun = () => {
+    if (!analysisResult || !imageId) return
+    if (savedRuns.length >= 3) return
+    const label = `Run ${savedRuns.length + 1}`
+    setSavedRuns((prev) => [...prev, {
+      label,
+      imageId,
+      removedIds: [...removedIds],
+      summary: analysisResult.summary,
+      particles: analysisResult.particles,
+    }])
+    setStatus(`${label} saved.`)
+  }
+
+  const fetchCompareHistogram = async () => {
+    if (savedRuns.length < 2) return
+    setBusy(true)
+    try {
+      const res = await fetch(`${API}/histogram/compare`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...await authHeaders(user) },
+        body: JSON.stringify({
+          runs: savedRuns.map((r) => ({ image_id: r.imageId, removed_cluster_ids: r.removedIds, label: r.label })),
+        }),
+      })
+      const data = await res.json()
+      setCompareHistogram(data.histogram_b64)
+      setCompareStats(data)
+    } catch (err) {
+      setStatus(`Compare failed: ${err.message}`)
     } finally {
       setBusy(false)
     }
@@ -450,6 +490,11 @@ export default function AnalyzerApp({ user }) {
                 Show Histogram
               </button>
             )}
+            {analysisResult && savedRuns.length < 3 && (
+              <button onClick={saveRun} disabled={busy}>
+                Save Run ({savedRuns.length}/3)
+              </button>
+            )}
             {analysisResult && (
               <div className={`download-menu ${downloadsOpen ? 'open' : ''}`}>
                 <button type="button" onClick={() => setDownloadsOpen((prev) => !prev)}>
@@ -470,7 +515,70 @@ export default function AnalyzerApp({ user }) {
           </div>
         )}
 
-        <ResultsPanel result={analysisResult} histogramB64={histogramB64} />
+        <ResultsPanel result={analysisResult} histogramB64={histogramB64} histogramStats={histogramStats} />
+
+        {savedRuns.length > 0 && (
+          <div className="saved-runs-panel">
+            <h3>Saved Runs</h3>
+            <table className="saved-runs-table">
+              <thead>
+                <tr>
+                  <th>Run</th>
+                  <th>Particles</th>
+                  <th>Mean Ø (mm)</th>
+                  <th>Std Ø (mm)</th>
+                  <th>Extraction (%)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {savedRuns.map((run) => (
+                  <tr key={run.label}>
+                    <td>{run.label}</td>
+                    <td>{run.summary?.cluster_count ?? '—'}</td>
+                    <td>{run.summary?.diameter_mean_mm?.toFixed(3) ?? '—'}</td>
+                    <td>{run.summary?.diameter_std_mm?.toFixed(3) ?? '—'}</td>
+                    <td>{run.summary?.average_extraction_yield_pct?.toFixed(1) ?? '—'}</td>
+                  </tr>
+                ))}
+                {savedRuns.length >= 2 && (() => {
+                  const means = savedRuns.map((r) => r.summary?.diameter_mean_mm).filter(Boolean)
+                  const avg = means.reduce((a, b) => a + b, 0) / means.length
+                  const sorted = [...means].sort((a, b) => a - b)
+                  const med = sorted.length % 2 === 0
+                    ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+                    : sorted[Math.floor(sorted.length / 2)]
+                  return (
+                    <tr className="saved-runs-summary-row">
+                      <td>Mean across runs</td>
+                      <td>—</td>
+                      <td>{avg.toFixed(3)} mm</td>
+                      <td>—</td>
+                      <td>—</td>
+                    </tr>
+                  )
+                })()}
+              </tbody>
+            </table>
+            {savedRuns.length >= 2 && (
+              <button onClick={fetchCompareHistogram} disabled={busy} style={{ marginTop: '0.75rem' }}>
+                Compare Runs Histogram
+              </button>
+            )}
+            {compareHistogram && (
+              <div className="histogram">
+                <h4>Run Comparison</h4>
+                <img className="histogram-image" src={`data:image/png;base64,${compareHistogram}`} alt="Comparison histogram" />
+                {compareStats?.combined && (
+                  <div className="histogram-stats">
+                    <span>Mean of means: <strong>{compareStats.combined.mean_of_means?.toFixed(3)} mm</strong></span>
+                    <span>Median of medians: <strong>{compareStats.combined.median_of_medians?.toFixed(3)} mm</strong></span>
+                    <span>Run-to-run σ: <strong>±{compareStats.combined.std_of_means?.toFixed(3)} mm</strong></span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </main>
     </div>
   )

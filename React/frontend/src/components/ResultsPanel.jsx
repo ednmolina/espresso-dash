@@ -1,4 +1,4 @@
-export default function ResultsPanel({ result, histogramB64 }) {
+export default function ResultsPanel({ result, histogramB64, histogramStats }) {
   if (!result) return null
 
   const { nclusters, background_median, summary } = result
@@ -23,6 +23,13 @@ export default function ResultsPanel({ result, histogramB64 }) {
         <div className="histogram">
           <h4>Histogram</h4>
           <img className="histogram-image" src={`data:image/png;base64,${histogramB64}`} alt="Histogram" />
+          {histogramStats && (
+            <div className="histogram-stats">
+              <span>Mean: <strong>{histogramStats.mean?.toFixed(3)} mm</strong></span>
+              <span>Median: <strong>{histogramStats.median?.toFixed(3)} mm</strong></span>
+              <span>±1σ: <strong>{histogramStats.std?.toFixed(3)} mm</strong></span>
+            </div>
+          )}
         </div>
       )}
     </div>
