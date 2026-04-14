@@ -25,20 +25,22 @@ export default function ResultsPanel({ result, histogramB64, histogramStats }) {
           <img className="histogram-image" src={`data:image/png;base64,${histogramB64}`} alt="Histogram" />
           {histogramStats && (
             <div className="histogram-stats">
-              <span>
-                Mean: <strong>{histogramStats.mean?.toFixed(3)}</strong>
-                <span className="asym-err">
-                  <span className="asym-upper">+{histogramStats.mean_upper?.toFixed(3)}</span>
-                  <span className="asym-lower">−{histogramStats.mean_lower?.toFixed(3)}</span>
-                </span> mm
-              </span>
-              <span>
-                Median: <strong>{histogramStats.median?.toFixed(3)}</strong>
-                <span className="asym-err">
-                  <span className="asym-upper">+{histogramStats.median_upper?.toFixed(3)}</span>
-                  <span className="asym-lower">−{histogramStats.median_lower?.toFixed(3)}</span>
-                </span> mm
-              </span>
+              {[
+                { label: 'Mean', val: histogramStats.mean, upper: histogramStats.mean_upper, lower: histogramStats.mean_lower },
+                { label: 'Median', val: histogramStats.median, upper: histogramStats.median_upper, lower: histogramStats.median_lower },
+              ].map(({ label, val, upper, lower }) => {
+                const s = histogramStats.scale ?? 1
+                const u = histogramStats.unit ?? 'mm'
+                return (
+                  <span key={label}>
+                    {label}: <strong>{(val * s).toFixed(3)}</strong>
+                    <span className="asym-err">
+                      <span className="asym-upper">+{(upper * s).toFixed(3)}</span>
+                      <span className="asym-lower">−{(lower * s).toFixed(3)}</span>
+                    </span> {u}
+                  </span>
+                )
+              })}
             </div>
           )}
         </div>

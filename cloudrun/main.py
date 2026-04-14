@@ -343,8 +343,37 @@ def erase(
     }
 
 
-def _add_stats_lines(ax, values: np.ndarray, x_log: bool, color: str = "#2c7bb6") -> dict:
-    """Add mean/median lines with asymmetric percentile errors. Returns stats dict."""
+def _unit_for_metric(metric: str, values: np.ndarray):
+    """Return (scale, display_unit, latex_unit, axis_label) based on data range."""
+    max_val = float(np.max(np.abs(values)))
+    if metric == "diameter":
+        if max_val >= 1.0:
+            return 1.0,   "mm",         r"\mathrm{mm}",          "Particle Diameter (mm)"
+        elif max_val >= 1e-3:
+            return 1e3,   r"$\mu$m",    r"\mu\mathrm{m}",        r"Particle Diameter ($\mu$m)"
+        else:
+            return 1e6,   "nm",         r"\mathrm{nm}",          "Particle Diameter (nm)"
+    elif metric == "surface":
+        if max_val >= 1.0:
+            return 1.0,   "mm²",        r"\mathrm{mm}^2",        "Particle Surface (mm²)"
+        else:
+            return 1e6,   r"$\mu$m²",   r"\mu\mathrm{m}^2",      r"Particle Surface ($\mu$m²)"
+    elif metric == "volume":
+        if max_val >= 1.0:
+            return 1.0,   "mm³",        r"\mathrm{mm}^3",        "Particle Volume (mm³)"
+        else:
+            return 1e9,   r"$\mu$m³",   r"\mu\mathrm{m}^3",      r"Particle Volume ($\mu$m³)"
+    else:  # extraction_yield — already in %
+        return 1.0, "%", r"\%", "Extraction Yield (%)"
+
+
+def _add_stats_lines(
+    ax, values: np.ndarray, x_log: bool,
+    color: str = "#2c7bb6",
+    scale: float = 1.0,
+    latex_unit: str = r"\mathrm{mm}",
+) -> dict:
+    """Add mean/median lines with LaTeX superscript/subscript asymmetric errors."""
     mean_val   = float(np.mean(values))
     median_val = float(np.median(values))
     p16, p25, p75, p84 = (float(np.percentile(values, p)) for p in (16, 25, 75, 84))
@@ -354,19 +383,31 @@ def _add_stats_lines(ax, values: np.ndarray, x_log: bool, color: str = "#2c7bb6"
     median_upper = p75 - median_val
     median_lower = median_val - p25
 
-    ax.axvline(mean_val, color=color, linestyle="--", linewidth=1.8,
-               label=f"Mean: {mean_val:.3f} +{mean_upper:.3f}/−{mean_lower:.3f} mm")
-    ax.axvline(p16, color=color, linestyle="-", linewidth=0.7, alpha=0.45)
-    ax.axvline(p84, color=color, linestyle="-", linewidth=0.7, alpha=0.45)
+    s = scale
+    mean_lbl = (
+        r"Mean: $" + f"{mean_val*s:.3f}"
+        + r"^{+" + f"{mean_upper*s:.3f}" + r"}"
+        + r"_{-" + f"{mean_lower*s:.3f}" + r"}"
+        + r"\," + latex_unit + r"$"
+    )
+    median_lbl = (
+        r"Median: $" + f"{median_val*s:.3f}"
+        + r"^{+" + f"{median_upper*s:.3f}" + r"}"
+        + r"_{-" + f"{median_lower*s:.3f}" + r"}"
+        + r"\," + latex_unit + r"$"
+    )
 
-    ax.axvline(median_val, color="#d7191c", linestyle=":", linewidth=1.8,
-               label=f"Median: {median_val:.3f} +{median_upper:.3f}/−{median_lower:.3f} mm")
-    ax.axvline(p25, color="#d7191c", linestyle="-", linewidth=0.7, alpha=0.45)
-    ax.axvline(p75, color="#d7191c", linestyle="-", linewidth=0.7, alpha=0.45)
+    ax.axvline(mean_val, color=color, linestyle="--", linewidth=1.8, label=mean_lbl)
+    ax.axvline(p16, color=color, linestyle="-", linewidth=0.8, alpha=0.5)
+    ax.axvline(p84, color=color, linestyle="-", linewidth=0.8, alpha=0.5)
+
+    ax.axvline(median_val, color="#d7191c", linestyle=":", linewidth=1.8, label=median_lbl)
+    ax.axvline(p25, color="#d7191c", linestyle="-", linewidth=0.8, alpha=0.5)
+    ax.axvline(p75, color="#d7191c", linestyle="-", linewidth=0.8, alpha=0.5)
 
     if not x_log:
-        ax.axvspan(p16, p84, alpha=0.10, color=color)
-        ax.axvspan(p25, p75, alpha=0.10, color="#d7191c")
+        ax.axvspan(p16, p84, alpha=0.09, color=color)
+        ax.axvspan(p25, p75, alpha=0.09, color="#d7191c")
 
     ax.legend(fontsize=8)
     return {
@@ -381,6 +422,7 @@ def histogram(
     authorization: Optional[str] = Header(None),
 ):
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
     from coffeegrindsize_core import metric_values as _metric_values
 
     _verify_token(authorization)
@@ -398,7 +440,14 @@ def histogram(
     )
     figure, _ = plot_histogram([dataset], settings)
     values = _metric_values(dataset, req.x_metric)
-    stats = _add_stats_lines(figure.axes[0], values, req.x_log)
+
+    scale, display_unit, latex_unit, axis_label = _unit_for_metric(req.x_metric, values)
+    ax = figure.axes[0]
+    ax.set_xlabel(axis_label)
+    if scale != 1.0:
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x * scale:.3g}"))
+
+    stats = _add_stats_lines(ax, values, req.x_log, scale=scale, latex_unit=latex_unit)
 
     buf = io.BytesIO()
     figure.savefig(buf, format="png", bbox_inches="tight")
@@ -406,6 +455,8 @@ def histogram(
 
     return {
         "histogram_b64": base64.b64encode(buf.getvalue()).decode(),
+        "unit": display_unit,
+        "scale": scale,
         **stats,
     }
 
@@ -436,11 +487,20 @@ def histogram_compare(
     )
     figure, _ = plot_histogram(datasets, settings)
 
+    # Determine unit from first dataset
+    first_values = _metric_values(datasets[0], req.x_metric)
+    scale, display_unit, latex_unit, axis_label = _unit_for_metric(req.x_metric, first_values)
+    ax = figure.axes[0]
+    ax.set_xlabel(axis_label)
+    if scale != 1.0:
+        from matplotlib.ticker import FuncFormatter
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x * scale:.3g}"))
+
     colors = ["#2c7bb6", "#2f7d4a", "#9c5a14"]
     per_run_stats = []
     for i, (ds, color) in enumerate(zip(datasets, colors)):
         values = _metric_values(ds, req.x_metric)
-        stats = _add_stats_lines(figure.axes[0], values, req.x_log, color=color)
+        stats = _add_stats_lines(ax, values, req.x_log, color=color, scale=scale, latex_unit=latex_unit)
         per_run_stats.append({"label": ds.label, **stats})
 
     all_means = [s["mean"] for s in per_run_stats]

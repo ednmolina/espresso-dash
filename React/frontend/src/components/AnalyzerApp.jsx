@@ -238,7 +238,7 @@ export default function AnalyzerApp({ user }) {
       })
       const data = await res.json()
       setHistogramB64(data.histogram_b64)
-      setHistogramStats({ mean: data.mean, median: data.median, std: data.std })
+      setHistogramStats({ mean: data.mean, mean_upper: data.mean_upper, mean_lower: data.mean_lower, median: data.median, median_upper: data.median_upper, median_lower: data.median_lower, unit: data.unit, scale: data.scale })
     } catch (err) {
       setStatus(`Histogram failed: ${err.message}`)
     } finally {
