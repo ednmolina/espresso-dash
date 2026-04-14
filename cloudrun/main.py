@@ -344,27 +344,35 @@ def erase(
 
 
 def _add_stats_lines(ax, values: np.ndarray, x_log: bool, color: str = "#2c7bb6") -> dict:
-    """Add mean/median/±1σ lines to a histogram axes. Returns stats dict."""
-    mean_val = float(np.mean(values))
+    """Add mean/median lines with asymmetric percentile errors. Returns stats dict."""
+    mean_val   = float(np.mean(values))
     median_val = float(np.median(values))
-    std_val = float(np.std(values))
+    p16, p25, p75, p84 = (float(np.percentile(values, p)) for p in (16, 25, 75, 84))
+
+    mean_upper   = p84 - mean_val
+    mean_lower   = mean_val - p16
+    median_upper = p75 - median_val
+    median_lower = median_val - p25
 
     ax.axvline(mean_val, color=color, linestyle="--", linewidth=1.8,
-               label=f"Mean: {mean_val:.3f} mm")
+               label=f"Mean: {mean_val:.3f} +{mean_upper:.3f}/−{mean_lower:.3f} mm")
+    ax.axvline(p16, color=color, linestyle="-", linewidth=0.7, alpha=0.45)
+    ax.axvline(p84, color=color, linestyle="-", linewidth=0.7, alpha=0.45)
+
     ax.axvline(median_val, color="#d7191c", linestyle=":", linewidth=1.8,
-               label=f"Median: {median_val:.3f} mm")
+               label=f"Median: {median_val:.3f} +{median_upper:.3f}/−{median_lower:.3f} mm")
+    ax.axvline(p25, color="#d7191c", linestyle="-", linewidth=0.7, alpha=0.45)
+    ax.axvline(p75, color="#d7191c", linestyle="-", linewidth=0.7, alpha=0.45)
 
     if not x_log:
-        ax.axvspan(mean_val - std_val, mean_val + std_val,
-                   alpha=0.12, color=color, label=f"±1σ: {std_val:.3f} mm")
-    else:
-        ax.axvline(max(mean_val - std_val, 1e-9), color=color,
-                   linestyle="-", linewidth=0.8, alpha=0.5)
-        ax.axvline(mean_val + std_val, color=color,
-                   linestyle="-", linewidth=0.8, alpha=0.5, label=f"±1σ: {std_val:.3f} mm")
+        ax.axvspan(p16, p84, alpha=0.10, color=color)
+        ax.axvspan(p25, p75, alpha=0.10, color="#d7191c")
 
     ax.legend(fontsize=8)
-    return {"mean": mean_val, "median": median_val, "std": std_val}
+    return {
+        "mean": mean_val, "mean_upper": mean_upper, "mean_lower": mean_lower,
+        "median": median_val, "median_upper": median_upper, "median_lower": median_lower,
+    }
 
 
 @app.post("/histogram")

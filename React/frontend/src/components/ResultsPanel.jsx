@@ -25,9 +25,20 @@ export default function ResultsPanel({ result, histogramB64, histogramStats }) {
           <img className="histogram-image" src={`data:image/png;base64,${histogramB64}`} alt="Histogram" />
           {histogramStats && (
             <div className="histogram-stats">
-              <span>Mean: <strong>{histogramStats.mean?.toFixed(3)} mm</strong></span>
-              <span>Median: <strong>{histogramStats.median?.toFixed(3)} mm</strong></span>
-              <span>±1σ: <strong>{histogramStats.std?.toFixed(3)} mm</strong></span>
+              <span>
+                Mean: <strong>{histogramStats.mean?.toFixed(3)}</strong>
+                <span className="asym-err">
+                  <span className="asym-upper">+{histogramStats.mean_upper?.toFixed(3)}</span>
+                  <span className="asym-lower">−{histogramStats.mean_lower?.toFixed(3)}</span>
+                </span> mm
+              </span>
+              <span>
+                Median: <strong>{histogramStats.median?.toFixed(3)}</strong>
+                <span className="asym-err">
+                  <span className="asym-upper">+{histogramStats.median_upper?.toFixed(3)}</span>
+                  <span className="asym-lower">−{histogramStats.median_lower?.toFixed(3)}</span>
+                </span> mm
+              </span>
             </div>
           )}
         </div>

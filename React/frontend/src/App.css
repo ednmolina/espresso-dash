@@ -1119,10 +1119,30 @@ textarea {
   font-size: 0.82rem;
   color: var(--muted);
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .histogram-stats strong {
   color: var(--text);
+}
+
+.asym-err {
+  display: inline-flex;
+  flex-direction: column;
+  font-size: 0.72em;
+  line-height: 1.15;
+  vertical-align: middle;
+  margin: 0 2px;
+}
+
+.asym-upper {
+  color: #2c7bb6;
+  line-height: 1.2;
+}
+
+.asym-lower {
+  color: #d7191c;
+  line-height: 1.2;
 }
 
 .saved-runs-panel {
