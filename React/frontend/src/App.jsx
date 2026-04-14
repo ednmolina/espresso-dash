@@ -113,8 +113,8 @@ export default function App() {
           <h1>React workspace</h1>
         </div>
         <div className="workspace-header-actions">
-          <div className="workspace-user-chip">
-            {authState.user?.email}
+          <div className="workspace-user-chip" title={authState.user?.email}>
+            {(authState.user?.email?.[0] ?? '?').toUpperCase()}
           </div>
           <nav className="workspace-switcher" aria-label="Workspace switcher">
             {WORKSPACES.map((item) => (
@@ -145,7 +145,7 @@ export default function App() {
         {visited.analyzer && (
           <section className={`workspace-panel ${workspace === 'analyzer' ? 'active' : 'hidden'}`} aria-hidden={workspace !== 'analyzer'}>
             <Suspense fallback={<div className="workspace-loading">Loading particle analyzer...</div>}>
-              <AnalyzerApp />
+              <AnalyzerApp user={authState.user} />
             </Suspense>
           </section>
         )}

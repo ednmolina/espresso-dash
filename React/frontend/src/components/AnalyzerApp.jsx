@@ -33,7 +33,17 @@ function UploadActions({ onUpload, large = false }) {
   )
 }
 
-export default function AnalyzerApp() {
+async function authHeaders(user) {
+  if (!user) return {}
+  try {
+    const token = await user.getIdToken()
+    return { Authorization: `Bearer ${token}` }
+  } catch {
+    return {}
+  }
+}
+
+export default function AnalyzerApp({ user }) {
   const [imageId, setImageId] = useState(null)
   const [imageSrc, setImageSrc] = useState(null)
   const [imageWidth, setImageWidth] = useState(0)
@@ -80,7 +90,7 @@ export default function AnalyzerApp() {
     form.append('file', file)
 
     try {
-      const res = await fetch(`${API}/upload`, { method: 'POST', body: form })
+      const res = await fetch(`${API}/upload`, { method: 'POST', headers: await authHeaders(user), body: form })
       const data = await res.json()
       setImageId(data.image_id)
       setImageSrc(`data:image/png;base64,${data.image_b64}`)
@@ -155,7 +165,7 @@ export default function AnalyzerApp() {
     try {
       const res = await fetch(`${API}/analyze`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...await authHeaders(user) },
         body: JSON.stringify({
           image_id: imageId,
           ...settings,
@@ -187,7 +197,7 @@ export default function AnalyzerApp() {
     try {
       const res = await fetch(`${API}/erase`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...await authHeaders(user) },
         body: JSON.stringify({
           image_id: imageId,
           erase_points: erasePoints.map((point) => [point.x, point.y]),
@@ -219,7 +229,7 @@ export default function AnalyzerApp() {
     try {
       const res = await fetch(`${API}/histogram`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...await authHeaders(user) },
         body: JSON.stringify({ image_id: imageId, removed_cluster_ids: removedIds }),
       })
       const data = await res.json()

@@ -44,7 +44,7 @@ jobs:
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
           VITE_ALLOWED_EMAIL: ${{ secrets.VITE_ALLOWED_EMAIL }}
           VITE_GITHUB_PAGES_BASE: /espresso-dash/
-          VITE_API_BASE: /api
+          VITE_API_BASE: ${{ secrets.VITE_API_BASE }}
         run: npm run build
 
       - name: Upload Pages artifact

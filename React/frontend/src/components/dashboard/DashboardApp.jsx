@@ -239,6 +239,32 @@ export default function DashboardApp() {
     }
   }
 
+  const handleDownloadCsv = () => {
+    const shots = shotsState?.shots ?? []
+    if (!shots.length) return
+    const columns = [
+      'date', 'roaster', 'region', 'continent', 'variety', 'processingTechnique',
+      'elevation', 'roast', 'spray', 'avgGrind', 'grindSetting', 'dose',
+      'yieldGrams', 'time', 'tempC', 'brix', 'ph', 'tds', 'extraction', 'rating', 'notes',
+    ]
+    const header = columns.join(',')
+    const rows = shots.map((shot) =>
+      columns.map((col) => {
+        const val = shot[col] ?? ''
+        return typeof val === 'string' && (val.includes(',') || val.includes('"') || val.includes('\n'))
+          ? `"${val.replace(/"/g, '""')}"`
+          : val
+      }).join(',')
+    )
+    const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `espresso-shots-${new Date().toISOString().slice(0, 10)}.csv`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+
   const handleCellUpdate = async (rowId, column, value) => {
     if (shotsState?.source !== 'firebase') {
       setError('Offline mode is using cached data. Reconnect to Firebase before editing.')
@@ -280,6 +306,9 @@ export default function DashboardApp() {
         <div className="dashboard-hero-actions">
           <button className="dashboard-secondary-button" onClick={handleRefreshData} disabled={refreshing}>
             {refreshing ? 'Refreshing...' : 'Refresh Data'}
+          </button>
+          <button className="dashboard-secondary-button" onClick={handleDownloadCsv} disabled={!shotsState?.shots?.length}>
+            Download CSV
           </button>
         </div>
       </header>
