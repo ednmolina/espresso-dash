@@ -30,15 +30,18 @@ export default function ResultsPanel({ result, histogramB64, histogramStats }) {
                 { label: 'Median', val: histogramStats.median, upper: histogramStats.median_upper, lower: histogramStats.median_lower },
               ].map(({ label, val, upper, lower }) => {
                 const s = histogramStats.scale ?? 1
-                const u = histogramStats.unit ?? 'mm'
+                const rawUnit = histogramStats.unit ?? 'mm'
+                const u = rawUnit.replace(/\$\\mu\$/g, 'μ')
                 return (
-                  <span key={label}>
-                    {label}: <strong>{(val * s).toFixed(3)}</strong>
+                  <div key={label} className="histogram-stat-row">
+                    <span className="stat-label">{label}:</span>
+                    <span className="stat-value">{(val * s).toFixed(3)}</span>
                     <span className="asym-err">
                       <span className="asym-upper">+{(upper * s).toFixed(3)}</span>
                       <span className="asym-lower">−{(lower * s).toFixed(3)}</span>
-                    </span> {u}
-                  </span>
+                    </span>
+                    <span className="stat-unit">{u}</span>
+                  </div>
                 )
               })}
             </div>
