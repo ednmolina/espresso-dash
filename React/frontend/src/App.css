@@ -1127,18 +1127,18 @@ textarea {
 }
 
 .stat-label {
-  color: var(--muted);
+  color: #fff;
   min-width: 54px;
 }
 
 .stat-value {
-  color: var(--text);
+  color: #fff;
   font-weight: 600;
   font-size: 1.05em;
 }
 
 .stat-unit {
-  color: var(--muted);
+  color: rgba(255, 255, 255, 0.7);
   font-size: 0.9em;
 }
 
