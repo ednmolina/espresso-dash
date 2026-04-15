@@ -386,14 +386,14 @@ def _add_stats_lines(
     s = scale
     mean_lbl = (
         r"Mean: $" + f"{mean_val*s:.3f}"
-        + r"^{+" + f"{mean_upper*s:.3f}" + r"}"
-        + r"_{-" + f"{mean_lower*s:.3f}" + r"}"
+        + r"^{+" + f"{abs(mean_upper*s):.3f}" + r"}"
+        + r"_{-" + f"{abs(mean_lower*s):.3f}" + r"}"
         + r"\," + latex_unit + r"$"
     )
     median_lbl = (
         r"Median: $" + f"{median_val*s:.3f}"
-        + r"^{+" + f"{median_upper*s:.3f}" + r"}"
-        + r"_{-" + f"{median_lower*s:.3f}" + r"}"
+        + r"^{+" + f"{abs(median_upper*s):.3f}" + r"}"
+        + r"_{-" + f"{abs(median_lower*s):.3f}" + r"}"
         + r"\," + latex_unit + r"$"
     )
 
