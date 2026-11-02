@@ -78,7 +78,11 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
 
   return (
     <aside className="analyzer-sidebar">
-      <h3>Analysis Settings</h3>
+      <div className="sidebar-title">
+        <h2>Settings</h2>
+        <p>Defaults work for most photos.</p>
+      </div>
+      <h3>Detection</h3>
 
       <label>
         <span className="label-row">
@@ -89,36 +93,37 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
           />
         </span>
         <input type="range" min={1} max={100} step={0.1} value={settings.threshold_percent} onChange={set('threshold_percent')} />
-        <span>{settings.threshold_percent.toFixed(1)}</span>
+        <output className="range-value">{settings.threshold_percent.toFixed(1)}</output>
       </label>
 
       <label>
         <span className="label-row">
-          <span>Reference Threshold</span>
+          <span>Reference threshold</span>
           <HelpTip
             label="Reference Threshold"
-            text="Controls how the reference object edge is detected. Raise it if the coin or ruler edge is noisy; lower it if the edge is missed."
+            text="Used when splitting touching particles: how dark a pixel must be (between a particle's darkest pixel and the background) to anchor a particle. Lower values split clumps more readily."
           />
         </span>
         <input type="range" min={0} max={1} step={0.01} value={settings.reference_threshold} onChange={set('reference_threshold')} />
-        <span>{settings.reference_threshold.toFixed(2)}</span>
+        <output className="range-value">{settings.reference_threshold.toFixed(2)}</output>
       </label>
 
+      <h3>Breakup &amp; filters</h3>
       <label>
         <span className="label-row">
-          <span>Cluster Breakup Cost</span>
+          <span>Breakup cost</span>
           <HelpTip
             label="Cluster Breakup Cost"
             text="Lower values split touching particles more aggressively. Higher values keep borderline clusters together."
           />
         </span>
         <input type="range" min={0.01} max={1} step={0.01} value={settings.max_cost} onChange={set('max_cost')} />
-        <span>{settings.max_cost.toFixed(2)}</span>
+        <output className="range-value">{settings.max_cost.toFixed(2)}</output>
       </label>
 
       <label>
         <span className="label-row">
-          <span>Max Cluster Axis (px)</span>
+          <span>Max particle radius (px)</span>
           <HelpTip
             label="Max Cluster Axis"
             text="Upper size limit for a single detected particle before it is treated as suspiciously large."
@@ -129,7 +134,7 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
 
       <label>
         <span className="label-row">
-          <span>Min Surface (px²)</span>
+          <span>Min area (px²)</span>
           <HelpTip
             label="Min Surface"
             text="Filters out tiny specks and sensor noise. Increase it if dust is being counted as particles."
@@ -140,7 +145,7 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
 
       <label>
         <span className="label-row">
-          <span>Min Roundness</span>
+          <span>Min roundness</span>
           <HelpTip
             label="Min Roundness"
             text="Rejects long, irregular shapes. Leave near zero unless scratches or background artifacts are getting through."
@@ -152,17 +157,17 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
       <label className="checkbox">
         <input type="checkbox" checked={settings.quick_mode} onChange={set('quick_mode')} />
         <span className="label-row">
-          <span>Quick clustering</span>
+          <span>Quick mode (skip breakup)</span>
           <HelpTip
             label="Quick clustering"
-            text="Faster, rougher clustering. Useful for iteration; disable it when you want the most careful breakup pass."
+            text="Skips the pass that splits touching particles. Faster, but clumps are counted as one large particle."
           />
         </span>
       </label>
 
       <label>
         <span className="label-row">
-          <span>Analysis Resolution</span>
+          <span>Analysis resolution</span>
           <HelpTip
             label="Analysis Resolution"
             text="Lower resolutions run much faster but reduce particle detail. Start at 50 to 75 percent for large photos, then rerun at 100 percent for final results."
@@ -173,8 +178,7 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
         </select>
       </label>
 
-      <hr />
-      <h3>Reference Object</h3>
+      <h3>Reference object</h3>
 
       <label>
         <span className="label-row">

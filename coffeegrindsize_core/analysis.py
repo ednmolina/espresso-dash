@@ -9,6 +9,8 @@ import pandas as pd
 from matplotlib.path import Path
 from PIL import Image
 
+from . import _kernels
+
 DEFAULT_REFERENCE_THRESHOLD = 0.4
 DEFAULT_THRESHOLD_PERCENT = 58.8
 DEFAULT_MAX_CLUSTER_AXIS = 100.0
@@ -17,6 +19,11 @@ DEFAULT_MIN_ROUNDNESS = 0.0
 DEFAULT_MAX_COST = 0.35
 DEFAULT_SMOOTHING = 3
 COFFEE_CELL_SIZE_MICRONS = 20.0
+# The reference implementation skipped the closing edge (last point -> first
+# point) when rejecting particles cut by the analysis region border.
+CLOSE_POLYGON_EDGES = True
+# Particles below this diameter count as "fines" (by volume).
+FINES_DIAMETER_MM = 0.1
 REFERENCE_OBJECTS_MM = {
     "Custom": None,
     "Canadian Quarter": 23.81,
@@ -227,8 +234,21 @@ def summarize_dataset(dataset: ParticleDataset, pixel_scale: float | None = None
         unbiased=True,
     ) * 100.0
 
+    # Volume-weighted size percentiles (Dv10/Dv50/Dv90), the convention used by
+    # laser-diffraction grind analysers, so numbers are comparable with them.
+    volume_weights = np.clip(volumes, 0.0, None)
+    dv10, dv50, dv90 = _weighted_percentiles(diameters, volume_weights, (10.0, 50.0, 90.0))
+    fines_pct = float(np.sum(volume_weights[diameters < FINES_DIAMETER_MM]) / np.sum(volume_weights) * 100.0)
+
     return {
         "cluster_count": float(dataset.nclusters),
+        "diameter_number_mean_mm": float(np.mean(diameters)),
+        "diameter_number_median_mm": float(np.median(diameters)),
+        "dv10_mm": dv10,
+        "dv50_mm": dv50,
+        "dv90_mm": dv90,
+        "span": float((dv90 - dv10) / dv50) if dv50 > 0 else float("nan"),
+        "fines_volume_pct": fines_pct,
         "diameter_mean_mm": float(diam_avg),
         "diameter_std_mm": float(diam_std),
         "surface_mean_mm2": float(surf_avg),
@@ -257,16 +277,17 @@ def clusters_within_radius(
     points: Iterable[tuple[float, float]],
     radius_pixels: float,
 ) -> set[int]:
-    selected: set[int] = set()
-    if radius_pixels <= 0:
-        return selected
+    points = list(points)
+    if radius_pixels <= 0 or not points or not dataset.clusters:
+        return set()
 
+    xmeans = np.array([cluster.xmean for cluster in dataset.clusters], dtype=float)
+    ymeans = np.array([cluster.ymean for cluster in dataset.clusters], dtype=float)
+    ids = np.array([int(cluster.cluster_id) for cluster in dataset.clusters])
+    hit = np.zeros(ids.size, dtype=bool)
     for x_point, y_point in points:
-        for cluster in dataset.clusters:
-            distance = np.sqrt((cluster.xmean - x_point) ** 2 + (cluster.ymean - y_point) ** 2)
-            if distance <= radius_pixels:
-                selected.add(int(cluster.cluster_id))
-    return selected
+        hit |= np.sqrt((xmeans - x_point) ** 2 + (ymeans - y_point) ** 2) <= radius_pixels
+    return set(int(i) for i in ids[hit])
 
 
 def render_cluster_overlay(source_rgb: np.ndarray, dataset: ParticleDataset) -> np.ndarray:
@@ -378,12 +399,10 @@ def _build_polygon_mask(
     if len(points) < 3:
         raise ValueError("An analysis polygon must contain at least three points.")
 
-    polygon_path = Path(points)
     rows, cols = image_shape
-    y_coords, x_coords = np.mgrid[0:rows, 0:cols]
-    query_points = np.vstack((x_coords.ravel(), y_coords.ravel())).T
-    contained = polygon_path.contains_points(query_points)
-    return contained.reshape(image_shape)
+    xs = np.array([p[0] for p in points], dtype=float)
+    ys = np.array([p[1] for p in points], dtype=float)
+    return _kernels.polygon_mask(rows, cols, xs, ys)
 
 
 def _make_threshold_overlay(source_rgb: np.ndarray, threshold_mask: np.ndarray) -> np.ndarray:
@@ -403,9 +422,9 @@ def _detect_particles(
     if rows.size == 0:
         return []
 
-    edge_lookup = set()
+    edge_grid = None
     if polygon_mask is not None:
-        edge_lookup = _polygon_edge_lookup(rows, cols, settings.analysis_polygon)
+        edge_grid = _polygon_edge_grid(blue_channel.shape, rows, cols, settings.analysis_polygon)
 
     sort_indices = np.argsort(blue_channel[rows, cols].astype(float))
     row_positions = rows[sort_indices].astype(float)
@@ -413,31 +432,32 @@ def _detect_particles(
     blue_values = blue_channel[rows[sort_indices], cols[sort_indices]].astype(float)
     total_pixels = row_positions.size
 
-    counted = np.zeros(total_pixels, dtype=bool)
+    # (row, col) -> index into the brightness-sorted pixel arrays
+    index_grid = np.full(blue_channel.shape, -1, dtype=np.int64)
+    index_grid[rows[sort_indices], cols[sort_indices]] = np.arange(total_pixels, dtype=np.int64)
+
+    counted = np.zeros(total_pixels, dtype=np.bool_)
+    visit_stamp = np.zeros(total_pixels, dtype=np.int64)
+    out_buf = np.empty(total_pixels, dtype=np.int64)
+    queue_buf = np.empty(total_pixels, dtype=np.int64)
+    max_axis_sq = float(settings.max_cluster_axis) ** 2
+    n_rows, n_cols = blue_channel.shape
+
     clusters: list[Cluster] = []
+    next_open = 0
     for cluster_id in range(total_pixels):
-        open_indices = np.where(~counted)[0]
-        if open_indices.size == 0:
+        # the darkest pixel not yet assigned seeds the next cluster
+        while next_open < total_pixels and counted[next_open]:
+            next_open += 1
+        if next_open >= total_pixels:
             break
+        current = next_open
 
-        current = open_indices[0]
-        distances_squared = (
-            (row_positions[current] - row_positions[open_indices]) ** 2
-            + (col_positions[current] - col_positions[open_indices]) ** 2
+        n_found = _kernels.grow_cluster(
+            index_grid, counted, row_positions, col_positions, current,
+            max_axis_sq, visit_stamp, cluster_id + 1, out_buf, queue_buf,
         )
-        nearby = np.where(distances_squared <= settings.max_cluster_axis**2)[0]
-        if nearby.size == 0:
-            counted[current] = True
-            continue
-
-        precluster = open_indices[nearby]
-        connected = _quick_cluster(
-            row_positions[precluster],
-            col_positions[precluster],
-            row_positions[current],
-            col_positions[current],
-        )
-        cluster_indices = precluster[connected]
+        cluster_indices = out_buf[:n_found].copy()
         if cluster_indices.size < settings.min_surface:
             counted[current] = True
             continue
@@ -451,16 +471,15 @@ def _detect_particles(
                     + (col_positions[cluster_indices] - col_positions[current]) ** 2
                 )
             ]
-            accepted_positions = _filter_cluster_pixels(
-                cluster_indices=cluster_indices,
-                current=current,
-                row_positions=row_positions,
-                col_positions=col_positions,
-                blue_values=blue_values,
-                background_median=background_median,
-                reference_threshold=settings.reference_threshold,
-                max_cost=settings.max_cost,
-                smoothing_window=settings.smoothing_window,
+            accepted_positions = _kernels.filter_cluster_pixels(
+                cluster_indices,
+                row_positions,
+                col_positions,
+                blue_values,
+                float(background_median),
+                float(settings.reference_threshold),
+                float(settings.max_cost),
+                int(settings.smoothing_window),
             )
 
         counted[cluster_indices] = True
@@ -474,15 +493,17 @@ def _detect_particles(
 
         if (
             x_pixels.min() <= 0
-            or x_pixels.max() >= blue_channel.shape[0] - 1
+            or x_pixels.max() >= n_rows - 1
             or y_pixels.min() <= 0
-            or y_pixels.max() >= blue_channel.shape[1] - 1
+            or y_pixels.max() >= n_cols - 1
         ):
             continue
 
-        if edge_lookup and any((int(xp), int(yp)) in edge_lookup for xp, yp in zip(x_pixels, y_pixels)):
+        if edge_grid is not None and edge_grid[x_pixels.astype(np.intp), y_pixels.astype(np.intp)].any():
             continue
 
+        # NOTE: (bg - zmin) / bg <= 1 always, so this multiplier is always 1.0.
+        # Kept to match the reference implementation.
         surface_multiplier = max((background_median - z_values.min()) / background_median, 1.0)
         surface = float(accepted_positions.size) * surface_multiplier
         xmean = float(np.mean(x_pixels))
@@ -509,114 +530,36 @@ def _detect_particles(
                 volume=volume,
                 xmean=xmean,
                 ymean=ymean,
-                x_pixels=x_pixels.astype(int),
-                y_pixels=y_pixels.astype(int),
+                x_pixels=x_pixels.astype(np.int32),
+                y_pixels=y_pixels.astype(np.int32),
             )
         )
 
     return clusters
 
 
-def _filter_cluster_pixels(
-    cluster_indices: np.ndarray,
-    current: int,
-    row_positions: np.ndarray,
-    col_positions: np.ndarray,
-    blue_values: np.ndarray,
-    background_median: float,
-    reference_threshold: float,
-    max_cost: float,
-    smoothing_window: int,
-) -> np.ndarray:
-    current_position = np.where(cluster_indices == current)[0]
-    if current_position.size != 1:
-        raise ValueError("The starting pixel was not found in the cluster.")
-
-    cost = (blue_values[cluster_indices] - blue_values[current]) ** 2 / background_median**2
-    cost = np.maximum(cost, 0.0)
-    accepted = np.array([int(current_position[0])], dtype=int)
-
-    for local_index, mask_index in enumerate(cluster_indices):
-        if mask_index == current:
-            continue
-
-        dark_candidates = cluster_indices[accepted][
-            blue_values[cluster_indices[accepted]]
-            <= ((background_median - blue_values[current]) * reference_threshold + blue_values[current])
-        ]
-        if dark_candidates.size == 0:
-            raise ValueError("At least one dark reference pixel should exist in every cluster.")
-
-        if dark_candidates.size > 1:
-            distances_squared = (
-                (row_positions[dark_candidates] - row_positions[mask_index]) ** 2
-                + (col_positions[dark_candidates] - col_positions[mask_index]) ** 2
-            )
-            dark_reference = dark_candidates[np.argmin(distances_squared)]
-        else:
-            dark_reference = dark_candidates[0]
-
-        if mask_index == dark_reference:
-            accepted = np.append(accepted, local_index)
-            continue
-
-        x1 = row_positions[mask_index]
-        y1 = col_positions[mask_index]
-        x2 = row_positions[dark_reference]
-        y2 = col_positions[dark_reference]
-        x0 = row_positions[cluster_indices]
-        y0 = col_positions[cluster_indices]
-
-        line_distances = np.abs((y2 - y1) * x0 - (x2 - x1) * y0 + x2 * y1 - y2 * x1) / np.sqrt(
-            (y2 - y1) ** 2 + (x2 - x1) ** 2
-        )
-        distance_to_start = np.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
-        distance_to_reference = np.sqrt((x2 - x0) ** 2 + (y2 - y0) ** 2)
-        reference_distance = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-
-        on_path = np.where(
-            (line_distances <= np.sqrt(2.0))
-            & (distance_to_start <= reference_distance)
-            & (distance_to_reference <= reference_distance)
-        )[0]
-        projected = np.sqrt(distance_to_reference[on_path] ** 2 - line_distances[on_path] ** 2)
-        ordered_path = on_path[np.argsort(projected)]
-        ordered_projected = np.sqrt(
-            distance_to_reference[ordered_path] ** 2 - line_distances[ordered_path] ** 2
-        )
-        if ordered_projected.size > 1 and np.diff(ordered_projected).max() > np.sqrt(2.0) * 1.01:
-            continue
-
-        path_cost = cost[ordered_path]
-        if smoothing_window < path_cost.size:
-            path_cost = _smooth(path_cost, smoothing_window) * smoothing_window
-        else:
-            path_cost = np.full(path_cost.size, np.sum(path_cost))
-
-        if np.max(path_cost) < max_cost:
-            accepted = np.append(accepted, local_index)
-
-    return accepted
-
-
-def _polygon_edge_lookup(
+def _polygon_edge_grid(
+    image_shape: tuple[int, int],
     rows: np.ndarray,
     cols: np.ndarray,
     polygon_points: Iterable[tuple[float, float]] | None,
-) -> set[tuple[int, int]]:
+) -> np.ndarray | None:
+    """Boolean image marking thresholded pixels that sit on the polygon border."""
     if polygon_points is None:
-        return set()
+        return None
 
-    x_points = cols.astype(float)
-    y_points = rows.astype(float)
-    polygon = list(polygon_points)
+    polygon = [tuple(point) for point in polygon_points]
+    if CLOSE_POLYGON_EDGES and len(polygon) >= 3 and polygon[0] != polygon[-1]:
+        polygon.append(polygon[0])
     edge_indices = _points_along_polygon(
-        x_points,
-        y_points,
+        cols.astype(float),
+        rows.astype(float),
         np.array([point[0] for point in polygon], dtype=float),
         np.array([point[1] for point in polygon], dtype=float),
     )
-    return {(int(rows[index]), int(cols[index])) for index in edge_indices}
+    grid = np.zeros(image_shape, dtype=bool)
+    grid[rows[edge_indices], cols[edge_indices]] = True
+    return grid
 
 
 def _points_along_polygon(
@@ -646,23 +589,30 @@ def _points_along_polygon(
     return np.where(triggered)[0]
 
 
+def cluster_label_grid(image_shape: tuple[int, int], clusters: list[Cluster]) -> np.ndarray:
+    labels = np.full(image_shape, -1, dtype=np.int64)
+    for position, cluster in enumerate(clusters):
+        labels[cluster.x_pixels, cluster.y_pixels] = position
+    return labels
+
+
+def cluster_outline_mask(image_shape: tuple[int, int], clusters: list[Cluster]) -> np.ndarray:
+    """Pixels on the border of each particle (3x3 neighbourhood not fully inside it)."""
+    return _kernels.outline_mask(cluster_label_grid(image_shape, clusters))
+
+
+def cluster_center_mask(image_shape: tuple[int, int], clusters: list[Cluster]) -> np.ndarray:
+    mask = np.zeros(image_shape, dtype=bool)
+    for cluster in clusters:
+        mask[int(round(cluster.xmean)), int(round(cluster.ymean))] = True
+    return mask
+
+
 def _make_cluster_overlay(source_rgb: np.ndarray, clusters: list[Cluster]) -> np.ndarray:
     overlay = source_rgb.copy()
-    for cluster in clusters:
-        x_pixels = cluster.x_pixels
-        y_pixels = cluster.y_pixels
-        for pixel_index in range(x_pixels.size):
-            neighbors = np.where(
-                (np.abs(x_pixels - x_pixels[pixel_index]) <= 1)
-                & (np.abs(y_pixels - y_pixels[pixel_index]) <= 1)
-            )[0]
-            if neighbors.size == 9:
-                continue
-            overlay[x_pixels[pixel_index], y_pixels[pixel_index]] = np.array([255, 0, 0], dtype=np.uint8)
-
-        x_center = int(round(cluster.xmean))
-        y_center = int(round(cluster.ymean))
-        overlay[x_center, y_center] = np.array([80, 80, 255], dtype=np.uint8)
+    shape = source_rgb.shape[:2]
+    overlay[cluster_outline_mask(shape, clusters)] = np.array([255, 0, 0], dtype=np.uint8)
+    overlay[cluster_center_mask(shape, clusters)] = np.array([80, 80, 255], dtype=np.uint8)
     return overlay
 
 
@@ -671,49 +621,17 @@ def _smooth(values: np.ndarray, window_size: int) -> np.ndarray:
     return np.convolve(values, window, "same")
 
 
-def _quick_cluster(x_pixels: np.ndarray, y_pixels: np.ndarray, x_start: float, y_start: float) -> np.ndarray:
-    x_to_check = np.array([x_start], dtype=float)
-    y_to_check = np.array([y_start], dtype=float)
-
-    x_remaining = x_pixels.copy()
-    y_remaining = y_pixels.copy()
-    remaining_indices = np.arange(x_pixels.size, dtype=int)
-
-    start_index = np.where((x_remaining == x_start) & (y_remaining == y_start))[0]
-    if start_index.size == 0:
-        return np.array([], dtype=int)
-
-    x_remaining = np.delete(x_remaining, start_index[0])
-    y_remaining = np.delete(y_remaining, start_index[0])
-    remaining_indices = np.delete(remaining_indices, start_index[0])
-
-    output = start_index.astype(int)
-    for _ in range(x_pixels.size):
-        if x_to_check.size == 0:
-            break
-
-        selection = np.where(
-            (np.abs(x_remaining - x_to_check[0]) + np.abs(y_remaining - y_to_check[0])) <= 1.001
-        )[0]
-        if selection.size == 0:
-            x_to_check = np.delete(x_to_check, 0)
-            y_to_check = np.delete(y_to_check, 0)
-            continue
-
-        output = np.append(output, remaining_indices[selection])
-        x_to_check = np.append(x_to_check, x_remaining[selection])
-        y_to_check = np.append(y_to_check, y_remaining[selection])
-        x_to_check = np.delete(x_to_check, 0)
-        y_to_check = np.delete(y_to_check, 0)
-
-        if selection.size == x_remaining.size:
-            break
-
-        x_remaining = np.delete(x_remaining, selection)
-        y_remaining = np.delete(y_remaining, selection)
-        remaining_indices = np.delete(remaining_indices, selection)
-
-    return output.astype(int)
+def _weighted_percentiles(values: np.ndarray, weights: np.ndarray, percentiles: Iterable[float]) -> list[float]:
+    """Percentiles of ``values`` where each sample counts in proportion to ``weights``."""
+    order = np.argsort(values)
+    sorted_values = values[order]
+    cumulative = np.cumsum(weights[order])
+    total = cumulative[-1]
+    if total <= 0:
+        return [float(np.percentile(values, p)) for p in percentiles]
+    # midpoint rule: each sample sits at the centre of its weight interval
+    positions = (cumulative - 0.5 * weights[order]) / total * 100.0
+    return [float(np.interp(p, positions, sorted_values)) for p in percentiles]
 
 
 def _weighted_stddev(

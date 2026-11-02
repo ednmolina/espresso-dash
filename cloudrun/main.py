@@ -10,8 +10,9 @@ import base64
 import io
 import os
 import pickle
-import sys
+import threading
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -19,12 +20,15 @@ from typing import Optional
 MPL_DIR = Path("/tmp/espresso-mpl")
 MPL_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(MPL_DIR))
+# numba caches compiled kernels next to the source by default; Cloud Run's
+# source directory is read-only, so keep the cache in /tmp instead.
+os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/espresso-numba")
 
 import matplotlib
 import numpy as np
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 matplotlib.use("Agg")
@@ -35,10 +39,11 @@ from coffeegrindsize_core import (
     ParticleDataset,
     REFERENCE_OBJECTS_MM,
     analyze_image,
+    cluster_center_mask,
+    cluster_outline_mask,
     clusters_within_radius,
     filter_dataset_by_cluster_ids,
     plot_histogram,
-    render_cluster_overlay,
     summarize_dataset,
 )
 
@@ -92,47 +97,103 @@ if _GCS_BUCKET_NAME:
     from google.cloud import storage as _gcs_lib
     _gcs_bucket = _gcs_lib.Client().bucket(_GCS_BUCKET_NAME)
 
-# Local dev in-memory fallback
-_local_images: dict[str, Image.Image] = {}
-_local_results: dict[str, object] = {}
+
+class _LRU:
+    """Small thread-safe LRU so repeat requests on a warm instance skip GCS."""
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self._data: OrderedDict[str, object] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: str):
+        with self._lock:
+            if key not in self._data:
+                return None
+            self._data.move_to_end(key)
+            return self._data[key]
+
+    def put(self, key: str, value: object) -> None:
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > self.capacity:
+                self._data.popitem(last=False)
 
 
-def _store_image(image_id: str, image: Image.Image) -> None:
+# In local dev these caches are the only storage, so make them roomier.
+_image_cache = _LRU(4 if _gcs_bucket is not None else 32)
+_result_cache = _LRU(8 if _gcs_bucket is not None else 64)
+
+
+def _decode_image(data: bytes) -> Image.Image:
+    # Apply EXIF orientation so the analysed pixels match what browsers display.
+    return ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+
+
+def _gcs_download(path: str) -> Optional[bytes]:
+    from google.api_core.exceptions import NotFound
+
+    try:
+        return _gcs_bucket.blob(path).download_as_bytes()
+    except NotFound:
+        return None
+
+
+def _store_image(image_id: str, raw: bytes, image: Image.Image) -> None:
+    # Keep the original upload bytes: no slow PNG re-encode, and no quality loss.
+    _image_cache.put(image_id, image)
     if _gcs_bucket is not None:
-        buf = io.BytesIO()
-        image.save(buf, format="PNG")
-        _gcs_bucket.blob(f"tmp/images/{image_id}.png").upload_from_string(
-            buf.getvalue(), content_type="image/png"
+        _gcs_bucket.blob(f"tmp/images/{image_id}.bin").upload_from_string(
+            raw, content_type="application/octet-stream"
         )
-    else:
-        _local_images[image_id] = image
 
 
 def _load_image(image_id: str) -> Optional[Image.Image]:
-    if _gcs_bucket is not None:
-        blob = _gcs_bucket.blob(f"tmp/images/{image_id}.png")
-        if not blob.exists():
-            return None
-        return Image.open(io.BytesIO(blob.download_as_bytes())).convert("RGB")
-    return _local_images.get(image_id)
+    image = _image_cache.get(image_id)
+    if image is not None or _gcs_bucket is None:
+        return image
+    raw = _gcs_download(f"tmp/images/{image_id}.bin")
+    if raw is None:
+        return None
+    image = _decode_image(raw)
+    _image_cache.put(image_id, image)
+    return image
 
 
-def _store_result(image_id: str, result: object) -> None:
+class StoredResult:
+    """What later requests need from an analysis: particles and image size.
+
+    The full AnalysisResult also holds several full-resolution image arrays;
+    pickling those to GCS was ~100 MB per analysis on a phone photo.
+    """
+
+    def __init__(self, dataset: ParticleDataset, shape: tuple[int, int], background_median: float):
+        self.dataset = dataset
+        self.shape = shape
+        self.background_median = background_median
+
+
+def _store_result(image_id: str, result: StoredResult) -> None:
+    _result_cache.put(image_id, result)
     if _gcs_bucket is not None:
         _gcs_bucket.blob(f"tmp/results/{image_id}.pkl").upload_from_string(
-            pickle.dumps(result)
+            pickle.dumps(result, protocol=pickle.HIGHEST_PROTOCOL)
         )
-    else:
-        _local_results[image_id] = result
 
 
-def _load_result(image_id: str) -> Optional[object]:
-    if _gcs_bucket is not None:
-        blob = _gcs_bucket.blob(f"tmp/results/{image_id}.pkl")
-        if not blob.exists():
-            return None
-        return pickle.loads(blob.download_as_bytes())
-    return _local_results.get(image_id)
+def _load_result(image_id: str) -> Optional[StoredResult]:
+    result = _result_cache.get(image_id)
+    if result is not None or _gcs_bucket is None:
+        return result
+    raw = _gcs_download(f"tmp/results/{image_id}.pkl")
+    if raw is None:
+        return None
+    result = pickle.loads(raw)
+    if not isinstance(result, StoredResult):  # legacy pickles held AnalysisResult
+        result = StoredResult(result.dataset, result.source_rgb.shape[:2], result.background_median)
+    _result_cache.put(image_id, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +201,25 @@ def _load_result(image_id: str) -> Optional[object]:
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Coffee Grind Size Analyzer API")
+
+
+@app.on_event("startup")
+def _warm_up() -> None:
+    """Compile (or load cached) numba kernels before the first real request."""
+    def run():
+        try:
+            rng = np.random.default_rng(0)
+            arr = np.full((64, 64, 3), 230, dtype=np.uint8)
+            arr[20:30, 20:28] = rng.integers(40, 90, size=(10, 8, 3))
+            image = Image.fromarray(arr)
+            analyze_image(image, AnalysisSettings(pixel_scale=10.0))
+            analyze_image(image, AnalysisSettings(pixel_scale=10.0, quick_mode=True))
+            cluster_outline_mask((4, 4), [])
+        except Exception:  # warm-up is best effort
+            pass
+
+    threading.Thread(target=run, daemon=True).start()
+
 
 _cors_origins = [
     "http://localhost:5173",
@@ -158,14 +238,38 @@ app.add_middleware(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _pil_to_b64(image: Image.Image, fmt: str = "PNG") -> str:
+def _pil_to_b64(image: Image.Image, fmt: str = "PNG", **save_kwargs) -> str:
     buf = io.BytesIO()
-    image.save(buf, format=fmt)
+    image.save(buf, format=fmt, **save_kwargs)
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _ndarray_to_b64(arr: np.ndarray) -> str:
-    return _pil_to_b64(Image.fromarray(arr))
+def _mask_layer_b64(mask: np.ndarray, color: tuple[int, int, int], extra: Optional[tuple[np.ndarray, tuple[int, int, int]]] = None) -> str:
+    """Encode a boolean mask as a transparent palette PNG for drawing over the photo.
+
+    Mostly-transparent palette PNGs are tiny and fast to encode compared with
+    re-encoding the whole photo with the overlay burned in.
+    """
+    indexed = mask.astype(np.uint8)
+    palette = [0, 0, 0, *color]
+    if extra is not None:
+        indexed[extra[0]] = 2
+        palette += list(extra[1])
+    layer = Image.fromarray(indexed, mode="L").convert("P")
+    layer.putpalette(palette + [0, 0, 0] * (256 - len(palette) // 3))
+    return _pil_to_b64(layer, "PNG", transparency=0, compress_level=1)
+
+
+def _cluster_layer_b64(shape: tuple[int, int], dataset: ParticleDataset) -> str:
+    return _mask_layer_b64(
+        cluster_outline_mask(shape, dataset.clusters),
+        (255, 59, 48),
+        extra=(cluster_center_mask(shape, dataset.clusters), (80, 160, 255)),
+    )
+
+
+def _particles_payload(dataset: ParticleDataset) -> list[dict]:
+    return dataset.to_frame().reset_index().rename(columns={"index": "ID"}).to_dict(orient="records")
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +305,7 @@ class HistogramRequest(BaseModel):
     weight_mode: str = "number"
     x_log: bool = True
     bins: Optional[int] = None
+    include_png: bool = True
 
 
 class RunRef(BaseModel):
@@ -215,6 +320,7 @@ class HistogramCompareRequest(BaseModel):
     weight_mode: str = "number"
     x_log: bool = True
     bins: Optional[int] = None
+    include_png: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -224,25 +330,40 @@ class HistogramCompareRequest(BaseModel):
 @app.post("/upload")
 async def upload_image(
     file: UploadFile = File(...),
+    include_preview: bool = False,
     authorization: Optional[str] = Header(None),
 ):
     _verify_token(authorization)
     data = await file.read()
     try:
-        image = Image.open(io.BytesIO(data)).convert("RGB")
+        image = _decode_image(data)
     except Exception:
         raise HTTPException(status_code=400, detail="Could not decode image.")
 
     image_id = str(uuid.uuid4())
-    _store_image(image_id, image)
+    _store_image(image_id, data, image)
 
-    return {
+    payload = {
         "image_id": image_id,
         "width": image.width,
         "height": image.height,
-        "image_b64": _pil_to_b64(image),
         "reference_objects": {k: v for k, v in REFERENCE_OBJECTS_MM.items() if v is not None},
     }
+    # The browser normally shows the file it already has; a preview is only
+    # needed when it cannot decode the format itself.
+    if include_preview:
+        payload["image_b64"] = _pil_to_b64(image, "JPEG", quality=90)
+        payload["image_mime"] = "image/jpeg"
+    return payload
+
+
+@app.get("/preview/{image_id}")
+def preview_image(image_id: str, authorization: Optional[str] = Header(None)):
+    _verify_token(authorization)
+    image = _load_image(image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found. Upload first.")
+    return {"image_b64": _pil_to_b64(image, "JPEG", quality=90), "image_mime": "image/jpeg"}
 
 
 @app.post("/analyze")
@@ -289,25 +410,35 @@ def analyze(
         pixel_scale=pixel_scale,
     )
 
-    result = analyze_image(analysis_image, settings)
-    _store_result(req.image_id, result)
+    try:
+        result = analyze_image(analysis_image, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     dataset = result.dataset
-    cluster_overlay = render_cluster_overlay(result.source_rgb, dataset)
+    shape = result.blue_channel.shape
+    stored = StoredResult(dataset, shape, result.background_median)
+    # "latest" result for erase/histogram, plus a frozen copy that saved runs
+    # can refer to even after the same image is re-analysed.
+    analysis_id = f"{req.image_id}.{uuid.uuid4().hex[:12]}"
+    _store_result(req.image_id, stored)
+    _store_result(analysis_id, stored)
 
     summary = None
     if dataset.nclusters > 0 and dataset.pixel_scale is not None:
         summary = summarize_dataset(dataset)
 
+    # Overlays are transparent layers drawn on top of the photo in the browser.
     return {
-        "threshold_overlay_b64": _ndarray_to_b64(result.threshold_overlay),
-        "cluster_overlay_b64": _ndarray_to_b64(cluster_overlay),
+        "threshold_layer_b64": _mask_layer_b64(result.threshold_mask, (255, 59, 48)),
+        "cluster_layer_b64": _cluster_layer_b64(shape, dataset),
         "background_median": result.background_median,
         "nclusters": dataset.nclusters,
         "pixel_scale": dataset.pixel_scale,
         "summary": summary,
-        "particles": dataset.to_frame().reset_index().rename(columns={"index": "ID"}).to_dict(orient="records"),
+        "particles": _particles_payload(dataset),
         "analysis_scale": scale,
+        "analysis_id": analysis_id,
     }
 
 
@@ -328,18 +459,17 @@ def erase(
 
     all_removed = already | ids_to_remove
     filtered = filter_dataset_by_cluster_ids(result.dataset, all_removed)
-    cluster_overlay = render_cluster_overlay(result.source_rgb, filtered)
 
     summary = None
     if filtered.nclusters > 0 and filtered.pixel_scale is not None:
         summary = summarize_dataset(filtered)
 
     return {
-        "removed_ids": list(all_removed),
+        "removed_ids": sorted(all_removed),
         "nclusters": filtered.nclusters,
-        "cluster_overlay_b64": _ndarray_to_b64(cluster_overlay),
+        "cluster_layer_b64": _cluster_layer_b64(result.shape, filtered),
         "summary": summary,
-        "particles": filtered.to_frame().reset_index().rename(columns={"index": "ID"}).to_dict(orient="records"),
+        "particles": _particles_payload(filtered),
     }
 
 
@@ -367,53 +497,79 @@ def _unit_for_metric(metric: str, values: np.ndarray):
         return 1.0, "%", r"\%", "Extraction Yield (%)"
 
 
+def _distribution_stats(values: np.ndarray) -> dict:
+    mean_val = float(np.mean(values))
+    median_val = float(np.median(values))
+    p16, p25, p75, p84 = (float(v) for v in np.percentile(values, (16, 25, 75, 84)))
+    return {
+        "mean": mean_val, "mean_upper": p84 - mean_val, "mean_lower": mean_val - p16,
+        "median": median_val, "median_upper": p75 - median_val, "median_lower": median_val - p25,
+        "p16": p16, "p25": p25, "p75": p75, "p84": p84,
+    }
+
+
 def _add_stats_lines(
-    ax, values: np.ndarray, x_log: bool,
+    ax, stats: dict, x_log: bool,
     color: str = "#2c7bb6",
     scale: float = 1.0,
     latex_unit: str = r"\mathrm{mm}",
-) -> dict:
+) -> None:
     """Add mean/median lines with LaTeX superscript/subscript asymmetric errors."""
-    mean_val   = float(np.mean(values))
-    median_val = float(np.median(values))
-    p16, p25, p75, p84 = (float(np.percentile(values, p)) for p in (16, 25, 75, 84))
-
-    mean_upper   = p84 - mean_val
-    mean_lower   = mean_val - p16
-    median_upper = p75 - median_val
-    median_lower = median_val - p25
-
     s = scale
-    mean_lbl = (
-        r"Mean: $" + f"{mean_val*s:.3f}"
-        + r"^{+" + f"{abs(mean_upper*s):.3f}" + r"}"
-        + r"_{-" + f"{abs(mean_lower*s):.3f}" + r"}"
-        + r"\," + latex_unit + r"$"
-    )
-    median_lbl = (
-        r"Median: $" + f"{median_val*s:.3f}"
-        + r"^{+" + f"{abs(median_upper*s):.3f}" + r"}"
-        + r"_{-" + f"{abs(median_lower*s):.3f}" + r"}"
-        + r"\," + latex_unit + r"$"
-    )
 
-    ax.axvline(mean_val, color=color, linestyle="--", linewidth=1.8, label=mean_lbl)
-    ax.axvline(p16, color=color, linestyle="-", linewidth=0.8, alpha=0.5)
-    ax.axvline(p84, color=color, linestyle="-", linewidth=0.8, alpha=0.5)
+    def label(name: str, val: float, upper: float, lower: float) -> str:
+        return (
+            name + r": $" + f"{val*s:.3f}"
+            + r"^{+" + f"{abs(upper*s):.3f}" + r"}"
+            + r"_{-" + f"{abs(lower*s):.3f}" + r"}"
+            + r"\," + latex_unit + r"$"
+        )
 
-    ax.axvline(median_val, color="#d7191c", linestyle=":", linewidth=1.8, label=median_lbl)
-    ax.axvline(p25, color="#d7191c", linestyle="-", linewidth=0.8, alpha=0.5)
-    ax.axvline(p75, color="#d7191c", linestyle="-", linewidth=0.8, alpha=0.5)
+    ax.axvline(stats["mean"], color=color, linestyle="--", linewidth=1.8,
+               label=label("Mean", stats["mean"], stats["mean_upper"], stats["mean_lower"]))
+    ax.axvline(stats["p16"], color=color, linestyle="-", linewidth=0.8, alpha=0.5)
+    ax.axvline(stats["p84"], color=color, linestyle="-", linewidth=0.8, alpha=0.5)
+
+    ax.axvline(stats["median"], color="#d7191c", linestyle=":", linewidth=1.8,
+               label=label("Median", stats["median"], stats["median_upper"], stats["median_lower"]))
+    ax.axvline(stats["p25"], color="#d7191c", linestyle="-", linewidth=0.8, alpha=0.5)
+    ax.axvline(stats["p75"], color="#d7191c", linestyle="-", linewidth=0.8, alpha=0.5)
 
     if not x_log:
-        ax.axvspan(p16, p84, alpha=0.09, color=color)
-        ax.axvspan(p25, p75, alpha=0.09, color="#d7191c")
+        ax.axvspan(stats["p16"], stats["p84"], alpha=0.09, color=color)
+        ax.axvspan(stats["p25"], stats["p75"], alpha=0.09, color="#d7191c")
 
     ax.legend(fontsize=8)
-    return {
-        "mean": mean_val, "mean_upper": mean_upper, "mean_lower": mean_lower,
-        "median": median_val, "median_upper": median_upper, "median_lower": median_lower,
-    }
+
+
+def _histogram_series(datasets: list[ParticleDataset], settings: HistogramSettings) -> dict:
+    """Bin edges and per-run weight fractions, so the browser can draw the chart."""
+    from coffeegrindsize_core import metric_values, plotting
+    from coffeegrindsize_core.analysis import metric_weights
+
+    values = [metric_values(ds, settings.x_metric) for ds in datasets]
+    weights = [metric_weights(ds, settings.weight_mode) for ds in datasets]
+    xmin = float(min(np.nanmin(v) for v in values))
+    xmax = float(max(np.nanmax(v) for v in values))
+    if settings.x_metric == "extraction_yield":
+        xmin, xmax = min(xmin, 20.0), max(xmax, 30.0)
+    if xmax <= xmin:
+        xmax = xmin * 1.01 + 1e-9
+    edges = plotting._build_bins(xmin=xmin, xmax=xmax, x_log=settings.x_log, bins=settings.bins)
+    series = []
+    for ds, v, w in zip(datasets, values, weights):
+        counts, _ = np.histogram(v, bins=edges, weights=w / np.nansum(w))
+        series.append({"label": ds.label, "fractions": counts.tolist()})
+    return {"edges": edges.tolist(), "series": series, "x_log": settings.x_log}
+
+
+def _figure_to_b64(figure) -> str:
+    import matplotlib.pyplot as plt
+
+    buf = io.BytesIO()
+    figure.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(figure)
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 @app.post("/histogram")
@@ -421,7 +577,6 @@ def histogram(
     req: HistogramRequest,
     authorization: Optional[str] = Header(None),
 ):
-    import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
     from coffeegrindsize_core import metric_values as _metric_values
 
@@ -438,25 +593,26 @@ def histogram(
         x_metric=req.x_metric, weight_mode=req.weight_mode,
         x_log=req.x_log, bins=req.bins,
     )
-    figure, _ = plot_histogram([dataset], settings)
     values = _metric_values(dataset, req.x_metric)
-
     scale, display_unit, latex_unit, axis_label = _unit_for_metric(req.x_metric, values)
-    ax = figure.axes[0]
-    ax.set_xlabel(axis_label)
-    if scale != 1.0:
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x * scale:.3g}"))
+    stats = _distribution_stats(values)
 
-    stats = _add_stats_lines(ax, values, req.x_log, scale=scale, latex_unit=latex_unit)
-
-    buf = io.BytesIO()
-    figure.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(figure)
+    histogram_b64 = None
+    if req.include_png:
+        figure, _ = plot_histogram([dataset], settings)
+        ax = figure.axes[0]
+        ax.set_xlabel(axis_label)
+        if scale != 1.0:
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x * scale:.3g}"))
+        _add_stats_lines(ax, stats, req.x_log, scale=scale, latex_unit=latex_unit)
+        histogram_b64 = _figure_to_b64(figure)
 
     return {
-        "histogram_b64": base64.b64encode(buf.getvalue()).decode(),
+        "histogram_b64": histogram_b64,
+        "series": _histogram_series([dataset], settings),
         "unit": display_unit,
         "scale": scale,
+        "axis_label": axis_label,
         **stats,
     }
 
@@ -466,7 +622,7 @@ def histogram_compare(
     req: HistogramCompareRequest,
     authorization: Optional[str] = Header(None),
 ):
-    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
     from coffeegrindsize_core import metric_values as _metric_values
 
     _verify_token(authorization)
@@ -480,28 +636,32 @@ def histogram_compare(
             raise HTTPException(status_code=400, detail=f"Run '{run.label}' has no particles or no scale.")
         ds.label = run.label or f"Run {len(datasets) + 1}"
         datasets.append(ds)
+    if not datasets:
+        raise HTTPException(status_code=400, detail="No runs to compare.")
 
     settings = HistogramSettings(
         x_metric=req.x_metric, weight_mode=req.weight_mode,
         x_log=req.x_log, bins=req.bins,
     )
-    figure, _ = plot_histogram(datasets, settings)
-
     # Determine unit from first dataset
     first_values = _metric_values(datasets[0], req.x_metric)
     scale, display_unit, latex_unit, axis_label = _unit_for_metric(req.x_metric, first_values)
-    ax = figure.axes[0]
-    ax.set_xlabel(axis_label)
-    if scale != 1.0:
-        from matplotlib.ticker import FuncFormatter
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x * scale:.3g}"))
 
-    colors = ["#2c7bb6", "#2f7d4a", "#9c5a14"]
-    per_run_stats = []
-    for i, (ds, color) in enumerate(zip(datasets, colors)):
-        values = _metric_values(ds, req.x_metric)
-        stats = _add_stats_lines(ax, values, req.x_log, color=color, scale=scale, latex_unit=latex_unit)
-        per_run_stats.append({"label": ds.label, **stats})
+    per_run_stats = [
+        {"label": ds.label, **_distribution_stats(_metric_values(ds, req.x_metric))} for ds in datasets
+    ]
+
+    histogram_b64 = None
+    if req.include_png:
+        figure, _ = plot_histogram(datasets, settings)
+        ax = figure.axes[0]
+        ax.set_xlabel(axis_label)
+        if scale != 1.0:
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x * scale:.3g}"))
+        colors = ["#2c7bb6", "#2f7d4a", "#9c5a14"]
+        for stats, color in zip(per_run_stats, colors):
+            _add_stats_lines(ax, stats, req.x_log, color=color, scale=scale, latex_unit=latex_unit)
+        histogram_b64 = _figure_to_b64(figure)
 
     all_means = [s["mean"] for s in per_run_stats]
     all_medians = [s["median"] for s in per_run_stats]
@@ -511,12 +671,12 @@ def histogram_compare(
         "std_of_means": float(np.std(all_means)),
     }
 
-    buf = io.BytesIO()
-    figure.savefig(buf, format="png", bbox_inches="tight")
-    plt.close(figure)
-
     return {
-        "histogram_b64": base64.b64encode(buf.getvalue()).decode(),
+        "histogram_b64": histogram_b64,
+        "series": _histogram_series(datasets, settings),
+        "unit": display_unit,
+        "scale": scale,
+        "axis_label": axis_label,
         "per_run": per_run_stats,
         "combined": combined,
     }

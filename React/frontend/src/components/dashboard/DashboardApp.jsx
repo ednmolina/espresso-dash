@@ -292,20 +292,21 @@ export default function DashboardApp() {
     <div className="dashboard-app">
       <header className="dashboard-hero">
         <div>
-          <p className="dashboard-kicker">Espresso Analysis</p>
-          <h1>Shot dashboard in React</h1>
+          <p className="dashboard-kicker">Espresso journal</p>
+          <h1>Shot dashboard</h1>
           <p className="dashboard-caption">
-            Firestore is the live data source. When it is unavailable, the dashboard falls back to the last cached snapshot in localStorage.
+            Log shots, follow extraction trends, and compare origins and experiments.
           </p>
           <div className={`dashboard-file-chip ${shotsState?.source === 'cache' ? 'warning' : ''}`}>
+            <span className="status-dot" aria-hidden="true" />
             {shotsState?.source === 'cache'
-              ? `⚠️ Offline — showing cached data${shotsState?.lastSyncedAt ? ` from ${new Date(shotsState.lastSyncedAt).toLocaleString()}` : ''}`
-              : 'Live: Firebase'}
+              ? `Offline · cached data${shotsState?.lastSyncedAt ? ` from ${new Date(shotsState.lastSyncedAt).toLocaleString()}` : ''}`
+              : 'Live · synced with Firebase'}
           </div>
         </div>
         <div className="dashboard-hero-actions">
           <button className="dashboard-secondary-button" onClick={handleRefreshData} disabled={refreshing}>
-            {refreshing ? 'Refreshing...' : 'Refresh Data'}
+            {refreshing ? 'Refreshing…' : 'Refresh data'}
           </button>
           <button className="dashboard-secondary-button" onClick={handleDownloadCsv} disabled={!shotsState?.shots?.length}>
             Download CSV

@@ -19,7 +19,7 @@ const PINCH_MIN_DISTANCE = 8
  *   erasePoints     – [{x, y}, ...] in original image coords
  *   eraseRadius     – radius in original image pixels
  *   onPointAdded    – (x, y) => void  called with original-image coords on click
- *   overlayB64      – optional base64 PNG to show instead of the original image
+ *   layerB64        – optional transparent base64 PNG drawn over the image
  */
 export default function ImageCanvas({
   imageSrc,
@@ -31,7 +31,7 @@ export default function ImageCanvas({
   erasePoints = [],
   eraseRadius = 20,
   onPointAdded,
-  overlayB64,
+  layerB64,
 }) {
   const canvasRef = useRef(null)
   const imgRef = useRef(null)
@@ -39,6 +39,8 @@ export default function ImageCanvas({
 
   // Viewport state: zoom level and pan offset (canvas pixels)
   const viewRef = useRef({ zoom: 1, panX: 0, panY: 0 })
+  // Canvas size in CSS pixels; the backing store is scaled by devicePixelRatio.
+  const sizeRef = useRef({ width: 0, height: 0, dpr: 1 })
   const [, forceRedraw] = useState(0)
 
   // Pointer gesture state
@@ -88,18 +90,24 @@ export default function ImageCanvas({
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     const { zoom, panX, panY } = viewRef.current
-    const W = canvas.width
-    const H = canvas.height
+    const { width: W, height: H, dpr } = sizeRef.current
 
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, W, H)
     ctx.save()
     ctx.translate(panX, panY)
     ctx.scale(zoom, zoom)
 
-    // Draw image (overlay takes priority if provided)
-    const img = overlayImgRef.current || imgRef.current
+    const img = imgRef.current
     if (img && img.complete) {
+      ctx.imageSmoothingEnabled = zoom < 1
       ctx.drawImage(img, 0, 0, imageWidth, imageHeight)
+    }
+    // Overlay layer: keep its pixels crisp when zoomed in.
+    const layer = overlayImgRef.current
+    if (layer && layer.complete) {
+      ctx.imageSmoothingEnabled = false
+      ctx.drawImage(layer, 0, 0, imageWidth, imageHeight)
     }
 
     ctx.restore()
@@ -197,11 +205,12 @@ export default function ImageCanvas({
   const fitToCanvas = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas || !imageWidth || !imageHeight) return
-    const scaleX = canvas.width / imageWidth
-    const scaleY = canvas.height / imageHeight
+    const { width: W, height: H } = sizeRef.current
+    const scaleX = W / imageWidth
+    const scaleY = H / imageHeight
     const zoom = Math.min(scaleX, scaleY, 1) // never upscale by default
-    const panX = (canvas.width - imageWidth * zoom) / 2
-    const panY = (canvas.height - imageHeight * zoom) / 2
+    const panX = (W - imageWidth * zoom) / 2
+    const panY = (H - imageHeight * zoom) / 2
     viewRef.current = { zoom, panX, panY }
     forceRedraw(n => n + 1)
   }, [imageWidth, imageHeight])
@@ -221,7 +230,7 @@ export default function ImageCanvas({
   }, [imageSrc, fitToCanvas])
 
   useEffect(() => {
-    if (!overlayB64) {
+    if (!layerB64) {
       overlayImgRef.current = null
       forceRedraw(n => n + 1)
       return
@@ -231,8 +240,8 @@ export default function ImageCanvas({
       overlayImgRef.current = img
       forceRedraw(n => n + 1)
     }
-    img.src = `data:image/png;base64,${overlayB64}`
-  }, [overlayB64])
+    img.src = `data:image/png;base64,${layerB64}`
+  }, [layerB64])
 
   // Redraw whenever anything changes
   useEffect(() => { draw() })
@@ -246,8 +255,10 @@ export default function ImageCanvas({
     if (!canvas) return
     const ro = new ResizeObserver(() => {
       const rect = canvas.parentElement.getBoundingClientRect()
-      canvas.width = rect.width
-      canvas.height = rect.height
+      const dpr = window.devicePixelRatio || 1
+      sizeRef.current = { width: rect.width, height: rect.height, dpr }
+      canvas.width = Math.round(rect.width * dpr)
+      canvas.height = Math.round(rect.height * dpr)
       fitToCanvas()
     })
     ro.observe(canvas.parentElement)
@@ -424,17 +435,7 @@ export default function ImageCanvas({
         onPointerUp={finishPointer}
         onPointerCancel={finishPointer}
       />
-      <button
-        onClick={fitToCanvas}
-        title="Reset zoom to fit"
-        style={{
-          position: 'absolute', top: 8, right: 8,
-          padding: '4px 8px', fontSize: 12,
-          background: 'rgba(0,0,0,0.55)', color: '#fff',
-          border: '1px solid rgba(255,255,255,0.2)', borderRadius: 4,
-          cursor: 'pointer',
-        }}
-      >
+      <button className="canvas-fit" onClick={fitToCanvas} title="Reset zoom to fit">
         Fit
       </button>
     </div>

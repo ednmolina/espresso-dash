@@ -8,3 +8,4 @@ matplotlib
 scikit-learn
 google-cloud-storage
 firebase-admin
+numba

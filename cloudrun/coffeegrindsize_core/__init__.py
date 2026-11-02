@@ -8,6 +8,8 @@ from .analysis import (
     filter_dataset_by_cluster_ids,
     metric_values,
     render_cluster_overlay,
+    cluster_outline_mask,
+    cluster_center_mask,
     REFERENCE_OBJECTS_MM,
     summarize_dataset,
 )
@@ -26,5 +28,7 @@ __all__ = [
     "metric_values",
     "plot_histogram",
     "render_cluster_overlay",
+    "cluster_outline_mask",
+    "cluster_center_mask",
     "summarize_dataset",
 ]
