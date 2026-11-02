@@ -15,3 +15,15 @@ React copy/
 .DS_Store
 *.log
 espresso-dash-firebase-adminsdk-fbsvc-45bdaec75b.json
+React/frontend/dist/
+React/frontend/node_modules/
+.venv/
+venv/
+*.nbi
+*.nbc
+.numba-cache/
+.numba_cache/
+.pytest_cache/
+playwright-report/
+test-results/
+*-firebase-adminsdk-*.json

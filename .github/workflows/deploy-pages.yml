@@ -3,6 +3,9 @@ name: Deploy React Frontend To GitHub Pages
 on:
   push:
     branches: [main]
+    paths:
+      - 'React/frontend/**'
+      - '.github/workflows/deploy-pages.yml'
   workflow_dispatch:
 
 permissions:
