@@ -1,6 +1,7 @@
-import { Suspense, lazy, useEffect, useState } from 'react'
+import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth'
 import { auth, provider } from './firebase'
+import DashboardSkeleton from './components/dashboard/DashboardSkeleton'
 
 const AnalyzerApp = lazy(() => import('./components/AnalyzerApp'))
 const DashboardApp = lazy(() => import('./components/dashboard/DashboardApp'))
@@ -76,7 +77,7 @@ export default function App() {
         <section className="auth-gate-card">
           <div className="workspace-brand"><BrandMark /><span>Espresso Lab</span></div>
           <h1>Checking access</h1>
-          <p className="auth-gate-copy">Authenticating with Firebase.</p>
+          <p className="auth-gate-copy"><span className="auth-spinner" aria-hidden="true" />Authenticating with Firebase.</p>
         </section>
       </main>
     )
@@ -88,7 +89,7 @@ export default function App() {
         <section className="auth-gate-card">
           <div className="workspace-brand"><BrandMark /><span>Espresso Lab</span></div>
           <h1>Sign in</h1>
-          <p className="auth-gate-copy">Access is restricted to the configured Google account.</p>
+          <p className="auth-gate-copy">Your espresso journal and grind analyzer, in one private workspace. Access is restricted to the configured Google account.</p>
           {authState.error && <div className="auth-gate-error">{authState.error}</div>}
           <button className="dashboard-primary-button auth-gate-button" type="button" onClick={handleGoogleLogin}>
             Continue with Google
@@ -119,6 +120,40 @@ export function Workspace({ user, onLogout }) {
     setVisited((prev) => (prev[nextWorkspace] ? prev : { ...prev, [nextWorkspace]: true }))
   }
 
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef(null)
+  const dashboardPanelRef = useRef(null)
+  const analyzerPanelRef = useRef(null)
+
+  useEffect(() => {
+    if (!menuOpen) return undefined
+    const onPointer = (event) => {
+      if (menuRef.current && !menuRef.current.contains(event.target)) setMenuOpen(false)
+    }
+    const onKey = (event) => {
+      if (event.key === 'Escape') setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onPointer)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onPointer)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
+
+  // Hidden panels stay mounted (state is kept) but must not be focusable.
+  useEffect(() => {
+    const sync = (node, hidden) => {
+      if (!node) return
+      if (hidden) node.setAttribute('inert', '')
+      else node.removeAttribute('inert')
+    }
+    sync(dashboardPanelRef.current, workspace !== 'dashboard')
+    sync(analyzerPanelRef.current, workspace !== 'analyzer')
+  }, [workspace, visited])
+
+  const initial = (user?.email?.[0] ?? '?').toUpperCase()
+
   return (
     <div className={`workspace-shell workspace-${workspace}`}>
       <header className="workspace-header">
@@ -140,25 +175,42 @@ export function Workspace({ user, onLogout }) {
           ))}
         </nav>
         <div className="workspace-header-actions">
-          <div className="workspace-user-chip" title={user?.email}>
-            {(user?.email?.[0] ?? '?').toUpperCase()}
-          </div>
-          <button className="workspace-logout" type="button" onClick={onLogout}>
+          <div className="workspace-user-chip workspace-user-chip-static" title={user?.email}>{initial}</div>
+          <button className="workspace-logout" type="button" onClick={onLogout} data-testid="logout">
             Log out
           </button>
+          <div className="workspace-user-menu" ref={menuRef}>
+            <button
+              type="button"
+              className="workspace-user-chip workspace-user-chip-button"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              aria-label="Account menu"
+              onClick={() => setMenuOpen((prev) => !prev)}
+              data-testid="user-menu-button"
+            >
+              {initial}
+            </button>
+            {menuOpen && (
+              <div className="workspace-user-popover" role="menu">
+                <div className="workspace-user-email">{user?.email}</div>
+                <button type="button" role="menuitem" onClick={onLogout} data-testid="logout-menu">Log out</button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
       <main className="workspace-body">
         {visited.dashboard && (
-          <section className={`workspace-panel ${workspace === 'dashboard' ? 'active' : 'hidden'}`} aria-hidden={workspace !== 'dashboard'}>
-            <Suspense fallback={<div className="workspace-loading">Loading espresso dashboard…</div>}>
+          <section ref={dashboardPanelRef} className={`workspace-panel ${workspace === 'dashboard' ? 'active' : 'hidden'}`} aria-hidden={workspace !== 'dashboard'}>
+            <Suspense fallback={<DashboardSkeleton />}>
               <DashboardApp />
             </Suspense>
           </section>
         )}
         {visited.analyzer && (
-          <section className={`workspace-panel ${workspace === 'analyzer' ? 'active' : 'hidden'}`} aria-hidden={workspace !== 'analyzer'}>
+          <section ref={analyzerPanelRef} className={`workspace-panel ${workspace === 'analyzer' ? 'active' : 'hidden'}`} aria-hidden={workspace !== 'analyzer'}>
             <Suspense fallback={<div className="workspace-loading">Loading particle analyzer…</div>}>
               <AnalyzerApp user={user} />
             </Suspense>

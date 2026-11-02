@@ -2,18 +2,20 @@ import {
   addDoc,
   collection,
   doc,
-  getDocs,
+  getDocsFromServer,
   updateDoc,
 } from 'firebase/firestore'
-import { db } from './firebase'
+import { db } from './firestore'
 
 export const MACRO_OPTIONS = Array.from({ length: 31 }, (_, index) => String(index + 1))
 export const MICRO_OPTIONS = 'ABCDEFGHI'.split('')
 export const RATING_LABELS = ['Bad', 'Good', 'Great']
+// Validated (light, surface #fffcf7) with the dataviz palette checker. Fixed order.
+// Good is only 2.32:1 against the surface, so text never uses series colours.
 export const RATING_COLORS = {
-  Bad: '#F2AE84',
-  Good: '#F9D949',
-  Great: '#628F47',
+  Bad: '#c0503a',
+  Good: '#d4a017',
+  Great: '#0f8f84',
 }
 export const TARGET_EXTRACTION_LOW = 18
 export const TARGET_EXTRACTION_HIGH = 22
@@ -21,15 +23,11 @@ export const TARGET_EXTRACTION_HIGH = 22
 const SHOTS_COLLECTION = 'shots'
 const CACHE_KEY = 'espresso_dash_cached_shots_v1'
 
-const CONTINENT_COLORS = {
-  Africa: '#6b8f71',
-  Asia: '#d9a441',
-  'North America': '#3b6fb6',
-  'South America': '#c85c3a',
-  Europe: '#7d5ba6',
-  Oceania: '#2a9d8f',
-  Unknown: '#c9c3b8',
-}
+// Only three continents can share a palette that passes every pairwise check, so
+// the top three by shot count get a hue and everything else is a hollow "Other".
+const CONTINENT_PALETTE = ['#2a78d6', '#eb6834', '#1baf7a']
+const OTHER_CONTINENT = 'Other'
+const OTHER_CONTINENT_COLOR = '#a3968a'
 
 const DISPLAY_TO_FIELD = {
   Date: 'date',
@@ -264,14 +262,18 @@ function cacheShots(shots) {
     shots,
     lastSyncedAt: new Date().toISOString(),
   }
-  window.localStorage.setItem(CACHE_KEY, JSON.stringify(payload))
+  try {
+    window.localStorage.setItem(CACHE_KEY, JSON.stringify(payload))
+  } catch {
+    // storage full or blocked: still serve the live data
+  }
   return payload
 }
 
 function readCache() {
-  const raw = window.localStorage.getItem(CACHE_KEY)
-  if (!raw) return null
   try {
+    const raw = window.localStorage.getItem(CACHE_KEY)
+    if (!raw) return null
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed.shots)) return null
     return parsed
@@ -280,29 +282,53 @@ function readCache() {
   }
 }
 
-export async function loadShotsData() {
+/** Synchronous read of the last good server snapshot, or null. */
+export function readCachedShots() {
+  const cached = readCache()
+  if (!cached) return null
+  return {
+    shots: cached.shots.map((shot) => normalizeShot(shot, shot.id)),
+    source: 'cache',
+    lastSyncedAt: cached.lastSyncedAt ?? null,
+  }
+}
+
+/**
+ * Fetch from the Firestore server (never the local cache). Rejects on timeout or
+ * when the SDK answers from its own cache; only a real server answer is cached.
+ */
+export async function fetchShotsFromServer({ timeoutMs = 6000 } = {}) {
+  let timer
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Firestore timed out')), timeoutMs)
+  })
   try {
-    const snapshot = await getDocs(collection(db, SHOTS_COLLECTION))
+    const snapshot = await Promise.race([
+      getDocsFromServer(collection(db, SHOTS_COLLECTION)),
+      timeout,
+    ])
+    if (snapshot.metadata?.fromCache) {
+      throw new Error('Firestore returned cached data')
+    }
     const shots = snapshot.docs
       .map((docSnap) => normalizeShot(docSnap.data(), docSnap.id))
       .filter((shot) => shot.date)
       .sort(safeDateSort)
     const cached = cacheShots(shots)
-    return {
-      shots,
-      source: 'firebase',
-      lastSyncedAt: cached.lastSyncedAt,
-    }
+    return { shots, source: 'firebase', lastSyncedAt: cached.lastSyncedAt }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Server first, falling back to the cache. */
+export async function loadShotsData(options) {
+  try {
+    return await fetchShotsFromServer(options)
   } catch (error) {
-    const cached = readCache()
-    if (cached) {
-      return {
-        shots: cached.shots.map((shot) => normalizeShot(shot, shot.id)),
-        source: 'cache',
-        lastSyncedAt: cached.lastSyncedAt,
-      }
-    }
-    throw new Error('Unable to load dashboard data from Firestore and no cached data is available.')
+    const cached = readCachedShots()
+    if (cached) return cached
+    throw new Error(`Unable to load shots: ${error.message}. No cached data is available.`)
   }
 }
 
@@ -518,6 +544,7 @@ export function buildDashboardPayload(shots) {
       average_tds: average(shots.map((shot) => shot.tds)),
       average_extraction: average(shots.map((shot) => shot.extraction)),
       average_rating: average(shots.map((shot) => shot.rating)),
+      last_shot_date: latestShot(shots)?.date ?? null,
     },
     defaults,
     field_options: buildFieldOptions(shots),
@@ -549,6 +576,31 @@ function continentDisplay(shot) {
   return shot.continent || 'Unknown'
 }
 
+/** Top three continents by shot count get a hue; everything else collapses to "Other". */
+function buildContinentScheme(shots) {
+  const counts = new Map()
+  shots.forEach((shot) => {
+    if (shot.continent) counts.set(shot.continent, (counts.get(shot.continent) || 0) + 1)
+  })
+  const ranked = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name]) => name)
+  const top = ranked.slice(0, CONTINENT_PALETTE.length)
+  const colors = {}
+  top.forEach((name, index) => { colors[name] = CONTINENT_PALETTE[index] })
+  const hasOther = shots.some((shot) => !top.includes(shot.continent))
+  const order = [...top]
+  if (hasOther) {
+    order.push(OTHER_CONTINENT)
+    colors[OTHER_CONTINENT] = OTHER_CONTINENT_COLOR
+  }
+  return {
+    colors,
+    order,
+    bucket: (shot) => (top.includes(shot.continent) ? shot.continent : OTHER_CONTINENT),
+  }
+}
+
 export function buildOriginsPayload(shots, filters) {
   let filtered = [...shots]
   if (filters.selected_roasters?.length) {
@@ -567,6 +619,7 @@ export function buildOriginsPayload(shots, filters) {
     filtered = filtered.filter((shot) => shot.continent)
   }
 
+  const scheme = buildContinentScheme(shots)
   const withCoords = filtered.filter((shot) => Number.isFinite(shot.lat) && Number.isFinite(shot.long))
   return {
     options: {
@@ -580,7 +633,8 @@ export function buildOriginsPayload(shots, filters) {
       long: shot.long,
       roaster: shot.roaster || null,
       region: shot.region || null,
-      continent: continentDisplay(shot),
+      continent: scheme.bucket(shot),
+      continent_name: continentDisplay(shot),
       extraction: shot.extraction,
       tds: shot.tds,
       dose: shot.dose,
@@ -595,7 +649,9 @@ export function buildOriginsPayload(shots, filters) {
       .map((shot) => ({
         __row_id: shot.id,
         Roaster: shot.roaster || null,
-        'Continent Display': continentDisplay(shot),
+        'Continent Display': scheme.bucket(shot),
+        Continent: continentDisplay(shot),
+        'Rating Label': ratingToLabel(shot.rating),
         Region: shot.region || null,
         Variety: shot.variety || null,
         'Processing Technique': shot.processingTechnique || null,
@@ -633,7 +689,8 @@ export function buildOriginsPayload(shots, filters) {
         Extraction: shot.extraction,
         'Rating Label': ratingToLabel(shot.rating),
       })),
-    continent_colors: CONTINENT_COLORS,
+    continent_colors: scheme.colors,
+    continent_order: scheme.order,
   }
 }
 
