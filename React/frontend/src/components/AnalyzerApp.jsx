@@ -33,10 +33,10 @@ const SHORTCUTS = [
 ]
 
 function isInteractiveTarget(target) {
-  return target instanceof HTMLElement && (
-    target.isContentEditable ||
-    ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(target.tagName)
-  )
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  if (target.tagName === 'INPUT') return !['checkbox', 'radio', 'range'].includes(target.type)
+  return ['TEXTAREA', 'SELECT'].includes(target.tagName)
 }
 
 function UploadActions({ onUpload, large = false }) {
@@ -462,6 +462,9 @@ export default function AnalyzerApp({ user }) {
     const onKeyDown = (event) => {
       if (event.repeat || isInteractiveTarget(event.target)) return
       if (event.ctrlKey || event.metaKey || event.altKey) return
+      // A focused button keeps its native Enter/Space activation.
+      if (event.target instanceof HTMLElement && event.target.tagName === 'BUTTON' &&
+          (event.key === 'Enter' || event.code === 'Space')) return
 
       const key = event.key.toLowerCase()
 

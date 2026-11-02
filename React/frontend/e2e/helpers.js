@@ -37,8 +37,6 @@ export async function openAnalyzer(page) {
   await openHarness(page)
   await page.getByRole('button', { name: 'Grind Analyzer' }).click()
   await expect(page.locator('.analyzer-app')).toBeVisible()
-  // Shortcuts are ignored while a button has focus (the tab we just clicked); start from a neutral focus.
-  await page.evaluate(() => document.activeElement?.blur())
 }
 
 export async function uploadFixture(page) {

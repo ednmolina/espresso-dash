@@ -2,7 +2,7 @@
 FastAPI backend for Coffee Grind Size Analyzer - Cloud Run edition.
 
 Local dev:  LOCAL_DEV=true uvicorn main:app --reload
-Cloud Run:  started via Procfile. Required env: GCS_BUCKET, ALLOWED_EMAILS
+Cloud Run:  deployed as a container (cloudrun/Dockerfile). Required env: GCS_BUCKET, ALLOWED_EMAILS
             (comma separated; ALLOWED_EMAIL is still read for compatibility).
 Optional env: CORS_ORIGINS, MAX_UPLOAD_BYTES, MAX_PIXELS, MAX_ANALYSIS_PIXELS,
               ANALYZE_CONCURRENCY, APP_VERSION.

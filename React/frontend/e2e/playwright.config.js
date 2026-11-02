@@ -9,6 +9,7 @@ const VITE_PORT = 5173
 
 export default defineConfig({
   testDir: here,
+  globalSetup: path.join(here, 'global-setup.js'),
   testMatch: '**/*.spec.js',
   timeout: 90_000,
   expect: { timeout: 15_000 },
