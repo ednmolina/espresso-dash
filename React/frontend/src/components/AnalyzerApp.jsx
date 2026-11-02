@@ -3,14 +3,33 @@ import ImageCanvas from './ImageCanvas'
 import Sidebar from './Sidebar'
 import ResultsPanel from './ResultsPanel'
 import HistogramChart, { SERIES_COLORS } from './HistogramChart'
-import { API, DEFAULT_SETTINGS, REFERENCE_OBJECTS } from '../constants'
+import { API, DEFAULT_SETTINGS, REFERENCE_OBJECTS, settingsPayload } from '../constants'
+import {
+  errorMessage, filterParticles, particlesToCsv,
+  isNum, um, cleanUnit, formatSigma, sig,
+} from '../analyzerUtils'
 import '../analyzer.css'
 
 const STEPS = [
-  { id: 'reference', n: '1', label: 'Scale', key: '1', color: '#e5484d' },
-  { id: 'polygon', n: '2', label: 'Region', key: '2', color: '#2fa89a' },
+  { id: 'reference', n: '1', label: 'Scale', key: '1', color: 'var(--step-scale)' },
+  { id: 'polygon', n: '2', label: 'Region', key: '2', color: 'var(--step-region)' },
   { id: 'detect', n: '3', label: 'Detect', key: '↵' },
-  { id: 'erase', n: '4', label: 'Clean up', key: '4', color: '#f08c2e' },
+  { id: 'erase', n: '4', label: 'Clean up', key: '4', color: 'var(--step-clean)' },
+]
+
+const SHORTCUTS = [
+  ['1', 'Scale: click both edges of the coin'],
+  ['2', 'Region: outline the grounds'],
+  ['Enter', 'Detect particles (or remove marked clusters)'],
+  ['4', 'Clean up: mark stray clusters'],
+  ['V / Space', 'View mode: drag to pan'],
+  ['Z / Backspace', 'Undo last point'],
+  ['Esc', 'Clear points in this step / close this panel'],
+  ['+  −  0', 'Zoom in, zoom out, fit to window'],
+  ['Shift 1', 'Zoom to 100%'],
+  ['[  ]', 'Smaller / larger eraser brush'],
+  ['Arrow keys', 'Pan (when the photo is focused)'],
+  ['?', 'Show or hide this sheet'],
 ]
 
 function isInteractiveTarget(target) {
@@ -61,8 +80,7 @@ async function apiRequest(user, path, { json, form, method = 'POST' } = {}) {
     // non-JSON error page
   }
   if (!res.ok) {
-    const detail = data?.detail
-    throw new Error(typeof detail === 'string' ? detail : `Request failed (${res.status})`)
+    throw new Error(errorMessage(data, res.status))
   }
   return data
 }
@@ -101,12 +119,20 @@ export default function AnalyzerApp({ user }) {
   const [erasePoints, setErasePoints] = useState([])
   const [eraseRadius, setEraseRadius] = useState(20)
   const [histogram, setHistogram] = useState(null)
+  const [histogramLoading, setHistogramLoading] = useState(false)
   const [savedRuns, setSavedRuns] = useState([])
   const [compare, setCompare] = useState(null)
   const [downloadsOpen, setDownloadsOpen] = useState(false)
   const [status, setStatus] = useState({ text: '', tone: 'info' })
   const [busy, setBusy] = useState(false)
+  const [busyLabel, setBusyLabel] = useState('Working…')
+  const [elapsed, setElapsed] = useState(0)
+  const [kbdOpen, setKbdOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const objectUrlRef = useRef(null)
+  const histSeq = useRef(0)
+  const downloadRef = useRef(null)
+  const kbdRef = useRef(null)
 
   const say = (text, tone = 'info') => setStatus({ text, tone })
 
@@ -134,13 +160,23 @@ export default function AnalyzerApp({ user }) {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
   }, [])
 
+  // Elapsed-seconds counter for the busy card.
+  useEffect(() => {
+    if (!busy) { setElapsed(0); return undefined }
+    const t0 = performance.now()
+    const id = setInterval(() => setElapsed((performance.now() - t0) / 1000), 100)
+    return () => clearInterval(id)
+  }, [busy])
+
+  const startBusy = (label) => { setBusyLabel(label); setBusy(true) }
+
   const handleUpload = async (e) => {
     const input = e.target
     const file = input.files[0]
     if (!file) return
     input.value = ''
 
-    setBusy(true)
+    startBusy('Uploading…')
     say('Uploading…')
 
     const form = new FormData()
@@ -165,6 +201,7 @@ export default function AnalyzerApp({ user }) {
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
       objectUrlRef.current = src.startsWith('blob:') ? src : null
 
+      histSeq.current += 1
       setImageId(data.image_id)
       setImageSrc(src)
       setImageWidth(data.width)
@@ -175,8 +212,9 @@ export default function AnalyzerApp({ user }) {
       setAnalysisResult(null)
       setRemovedIds([])
       setHistogram(null)
+      setHistogramLoading(false)
       setMode('reference')
-      say('Click both edges of your reference coin to set the scale.')
+      say('Click one edge of your reference coin to set the scale.')
     } catch (err) {
       say(`Upload failed: ${err.message}`, 'error')
     } finally {
@@ -188,7 +226,7 @@ export default function AnalyzerApp({ user }) {
     if (mode === 'reference') {
       setReferencePoints((prev) => {
         const next = [...prev, { x, y }]
-        return next.length > 2 ? next.slice(-2) : next
+        return next.length > 2 ? next.slice(-1) : next
       })
     } else if (mode === 'polygon') {
       setPolygonPoints((prev) => [...prev, { x, y }])
@@ -196,6 +234,14 @@ export default function AnalyzerApp({ user }) {
       setErasePoints((prev) => [...prev, { x, y }])
     }
   }, [mode])
+
+  // Keep the status line in step with the scale clicks.
+  useEffect(() => {
+    if (mode !== 'reference') return
+    if (referencePoints.length === 1) say('Now the opposite edge of the coin.')
+    else if (referencePoints.length === 2 && pixelScale) say(`Scale set: ${pixelScale.toFixed(1)} px/mm`, 'success')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [referencePoints.length])
 
   const handlePresetChange = (name) => {
     setReferencePreset(name)
@@ -230,9 +276,29 @@ export default function AnalyzerApp({ user }) {
     }
   }, [mode, referencePoints.length, polygonPoints.length, erasePoints.length])
 
-  const runAnalysis = useCallback(async () => {
+  /** Histogram for the current analysis; fetched automatically after detect/erase. */
+  const loadHistogram = useCallback(async (ids) => {
     if (!imageId) return
-    setBusy(true)
+    const seq = ++histSeq.current
+    setHistogramLoading(true)
+    try {
+      const data = await apiRequest(user, '/histogram', {
+        json: { image_id: imageId, removed_cluster_ids: ids, include_png: false },
+      })
+      if (seq === histSeq.current) setHistogram(data)
+    } catch (err) {
+      if (seq === histSeq.current) say(`Histogram failed: ${err.message}`, 'error')
+    } finally {
+      if (seq === histSeq.current) setHistogramLoading(false)
+    }
+  }, [imageId, user])
+
+  const canDetect = referencePoints.length === 2
+
+  const runAnalysis = useCallback(async () => {
+    if (!imageId || busy) return
+    if (!canDetect) { say('Set the scale first: click both edges of the coin.', 'error'); return }
+    startBusy('Detecting particles…')
     say('Detecting particles…')
     const started = performance.now()
 
@@ -240,7 +306,7 @@ export default function AnalyzerApp({ user }) {
       const data = await apiRequest(user, '/analyze', {
         json: {
           image_id: imageId,
-          ...settings,
+          ...settingsPayload(settings),
           reference_points: referencePoints.map((point) => [point.x, point.y]),
           reference_physical_mm: referencePhysicalMm,
           polygon_points: polygonPoints.map((point) => [point.x, point.y]),
@@ -254,17 +320,18 @@ export default function AnalyzerApp({ user }) {
       setMode('erase')
       setDownloadsOpen(false)
       const secs = ((performance.now() - started) / 1000).toFixed(1)
-      say(`${data.nclusters.toLocaleString()} particles detected in ${secs}s. Click stray clusters to remove them.`, 'success')
+      say(`${(data.nclusters ?? 0).toLocaleString()} particles detected in ${secs}s. Click stray clusters to remove them.`, 'success')
+      if (data.summary) loadHistogram([])
     } catch (err) {
-      say(`Analysis failed: ${err.message}`, 'error')
+      say(`Detection failed: ${err.message}. Try lowering Threshold or Analysis resolution.`, 'error')
     } finally {
       setBusy(false)
     }
-  }, [imageId, settings, referencePoints, referencePhysicalMm, polygonPoints, user])
+  }, [imageId, busy, canDetect, settings, referencePoints, referencePhysicalMm, polygonPoints, user, loadHistogram])
 
   const applyErase = useCallback(async () => {
     if (!imageId || !erasePoints.length) return
-    setBusy(true)
+    startBusy('Removing clusters…')
     say('Removing clusters…')
 
     try {
@@ -276,38 +343,27 @@ export default function AnalyzerApp({ user }) {
           already_removed_ids: removedIds,
         },
       })
+      const gone = data.removed_ids ?? removedIds
       setAnalysisResult((prev) => ({
         ...prev,
-        cluster_layer_b64: data.cluster_layer_b64,
-        nclusters: data.nclusters,
-        summary: data.summary,
-        particles: data.particles,
+        cluster_layer_b64: data.cluster_layer_b64 ?? prev.cluster_layer_b64,
+        nclusters: data.nclusters ?? prev.nclusters,
+        summary: data.summary ?? prev.summary,
+        // newer servers omit particles: filter the local copy instead
+        particles: data.particles ?? filterParticles(prev.particles, gone),
       }))
-      setRemovedIds(data.removed_ids)
+      setRemovedIds(gone)
       setErasePoints([])
       setHistogram(null)
-      say(`${data.removed_ids.length} clusters removed.`, 'success')
+      const added = gone.length - removedIds.length
+      say(added > 0 ? `${added} cluster${added === 1 ? '' : 's'} removed (${gone.length} in total).` : 'No clusters under the brush.', added > 0 ? 'success' : 'info')
+      if ((data.summary ?? analysisResult?.summary)) loadHistogram(gone)
     } catch (err) {
       say(`Erase failed: ${err.message}`, 'error')
     } finally {
       setBusy(false)
     }
-  }, [imageId, erasePoints, eraseRadius, removedIds, user])
-
-  const fetchHistogram = async () => {
-    if (!imageId) return
-    setBusy(true)
-    try {
-      const data = await apiRequest(user, '/histogram', {
-        json: { image_id: imageId, removed_cluster_ids: removedIds, include_png: false },
-      })
-      setHistogram(data)
-    } catch (err) {
-      say(`Histogram failed: ${err.message}`, 'error')
-    } finally {
-      setBusy(false)
-    }
-  }
+  }, [imageId, erasePoints, eraseRadius, removedIds, user, loadHistogram, analysisResult])
 
   const saveRun = () => {
     if (!analysisResult || !imageId) return
@@ -319,7 +375,6 @@ export default function AnalyzerApp({ user }) {
       imageId: analysisResult.analysis_id ?? imageId,
       removedIds: [...removedIds],
       summary: analysisResult.summary,
-      particles: analysisResult.particles,
     }])
     setCompare(null)
     say(`${label} saved.`, 'success')
@@ -332,7 +387,7 @@ export default function AnalyzerApp({ user }) {
 
   const fetchCompareHistogram = async () => {
     if (savedRuns.length < 2) return
-    setBusy(true)
+    startBusy('Comparing runs…')
     try {
       setCompare(await apiRequest(user, '/histogram/compare', { json: compareBody(false) }))
     } catch (err) {
@@ -343,21 +398,18 @@ export default function AnalyzerApp({ user }) {
   }
 
   const downloadCsv = () => {
-    if (!analysisResult?.particles?.length) return
-    const columns = Object.keys(analysisResult.particles[0])
-    const csvRows = [
-      columns.join(','),
-      ...analysisResult.particles.map((row) => columns.map((column) => JSON.stringify(row[column] ?? '')).join(',')),
-    ]
-    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8' })
+    setDownloadsOpen(false)
+    const csv = particlesToCsv(analysisResult?.particles, removedIds)
+    if (!csv) { say('No particles to export.', 'error'); return }
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     downloadDataUrl(url, 'particle-analysis.csv')
-    URL.revokeObjectURL(url)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
   // The PNG chart is rendered server-side only when someone asks for the file.
   const downloadHistogram = async () => {
-    setBusy(true)
+    startBusy('Rendering chart…')
     try {
       const data = await apiRequest(user, '/histogram', {
         json: { image_id: imageId, removed_cluster_ids: removedIds, include_png: true },
@@ -372,7 +424,7 @@ export default function AnalyzerApp({ user }) {
   }
 
   const downloadCompare = async () => {
-    setBusy(true)
+    startBusy('Rendering chart…')
     try {
       const data = await apiRequest(user, '/histogram/compare', { json: compareBody(true) })
       downloadDataUrl(`data:image/png;base64,${data.histogram_b64}`, 'run-comparison.png')
@@ -386,16 +438,45 @@ export default function AnalyzerApp({ user }) {
   const clearRuns = () => {
     setSavedRuns([])
     setCompare(null)
-    setHistogram(null)
   }
+
+  // Download menu: close on outside click and Esc.
+  useEffect(() => {
+    if (!downloadsOpen) return undefined
+    const onDown = (e) => { if (downloadRef.current && !downloadRef.current.contains(e.target)) setDownloadsOpen(false) }
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); setDownloadsOpen(false) }
+    }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey, true)
+    downloadRef.current?.querySelector('[role=menuitem]')?.focus()
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [downloadsOpen])
+
+  useEffect(() => { if (kbdOpen) kbdRef.current?.focus() }, [kbdOpen])
 
   useEffect(() => {
     const onKeyDown = (event) => {
-      if (event.repeat || isInteractiveTarget(event.target) || busy) return
+      if (event.repeat || isInteractiveTarget(event.target)) return
+      if (event.ctrlKey || event.metaKey || event.altKey) return
 
       const key = event.key.toLowerCase()
 
-      if (key === '1') {
+      if (event.key === '?') {
+        event.preventDefault()
+        setKbdOpen((v) => !v)
+        return
+      }
+      if (kbdOpen) {
+        if (key === 'escape') { event.preventDefault(); setKbdOpen(false) }
+        return
+      }
+      if (busy) return
+
+      if (key === '1' && !event.shiftKey) {
         event.preventDefault()
         setMode('reference')
         return
@@ -407,7 +488,7 @@ export default function AnalyzerApp({ user }) {
         return
       }
 
-      if (key === '4') {
+      if (key === '4' && analysisResult) {
         event.preventDefault()
         setMode('erase')
         return
@@ -449,16 +530,38 @@ export default function AnalyzerApp({ user }) {
     busy,
     clearActivePoints,
     erasePoints.length,
+    kbdOpen,
     mode,
     runAnalysis,
     undoActivePoints,
   ])
 
   const activeColor = STEPS.find((s) => s.id === mode)?.color ?? '#8a7c6e'
-  const unit = (compare?.unit ?? 'mm').replace(/\$\\mu\$/g, 'µ')
+  // Present the combined stats in µm even when the server's axis unit is mm.
+  const rawUnit = cleanUnit(compare?.unit ?? 'mm')
+  const unit = rawUnit
+  const cscale = compare?.scale ?? 1
+  const toUm = rawUnit === 'mm' ? 1000 : 1
+  const runLabel = mode === 'erase' && analysisResult ? 'Re-run' : 'Detect particles ⏎'
+  const detectDisabled = busy || !canDetect
+  const detectTitle = !canDetect ? 'Set the scale first' : 'Run particle detection (Enter)'
+  const overlayOptions = ['original', 'threshold', 'clusters']
+  const regionClosed = polygonPoints.length >= 3
+
+  const onOverlayKey = (e) => {
+    const i = overlayOptions.indexOf(overlayMode)
+    let next = null
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = overlayOptions[(i + 1) % 3]
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = overlayOptions[(i + 2) % 3]
+    if (next) {
+      e.preventDefault()
+      setOverlayMode(next)
+      e.currentTarget.querySelector(`[data-value=${next}]`)?.focus()
+    }
+  }
 
   return (
-    <div className={`analyzer-app ${imageSrc ? 'has-image' : ''}`}>
+    <div className={`analyzer-app ${imageSrc ? 'has-image' : ''} ${settingsOpen ? 'settings-open' : ''}`}>
       <Sidebar
         settings={settings}
         onSettingsChange={setSettings}
@@ -466,6 +569,8 @@ export default function AnalyzerApp({ user }) {
         onPresetChange={handlePresetChange}
         referencePhysicalMm={referencePhysicalMm}
         onPhysicalMmChange={setReferencePhysicalMm}
+        open={settingsOpen}
+        onToggle={() => setSettingsOpen((v) => !v)}
       />
 
       <main className="analyzer-main">
@@ -481,21 +586,29 @@ export default function AnalyzerApp({ user }) {
           <div className="toolbar">
             <ol className="stepper">
               {STEPS.map((step) => {
-                const isActive = mode === step.id
+                const isCurrent = mode === step.id
+                const isDone = !isCurrent && stepDone[step.id]
+                const isDisabled = !isCurrent && !isDone && step.id === 'erase' && !analysisResult
+                const detectBlocked = step.id === 'detect' && !canDetect
                 const onClick = step.id === 'detect' ? runAnalysis : () => setMode(step.id)
-                const disabled = busy || (step.id === 'erase' && !analysisResult)
+                const disabled = busy || (step.id === 'erase' && !analysisResult) || detectBlocked
+                let title = `Shortcut: ${step.key}`
+                if (step.id === 'erase' && !analysisResult) title = 'Run detection first'
+                else if (detectBlocked) title = 'Set the scale first'
                 return (
                   <li key={step.id}>
                     <button
                       type="button"
-                      className={`step ${isActive ? 'active' : ''} ${stepDone[step.id] ? 'done' : ''} ${step.id === 'detect' ? 'step-run' : ''}`}
+                      className={`step ${isCurrent ? 'current' : ''} ${isDone ? 'done' : ''} ${(isDisabled || (disabled && !isCurrent && !isDone)) ? 'is-disabled' : ''}`}
                       style={step.color ? { '--step-color': step.color } : undefined}
+                      aria-current={isCurrent ? 'step' : undefined}
                       onClick={onClick}
                       disabled={disabled}
-                      title={`Shortcut: ${step.key}`}
+                      title={title}
                     >
-                      <span className="step-n">{stepDone[step.id] && !isActive ? '✓' : step.n}</span>
-                      {step.id === 'detect' && busy ? 'Running…' : step.label}
+                      <span className="step-n" aria-hidden="true">{isDone ? '✓' : step.n}</span>
+                      <span className="step-label">{step.label}</span>
+                      {step.id === 'detect' && busy && busyLabel.startsWith('Detecting') && <span className="spinner" aria-hidden="true" />}
                     </button>
                   </li>
                 )
@@ -506,9 +619,9 @@ export default function AnalyzerApp({ user }) {
               {mode === 'reference' && (
                 <>
                   <span className="toolbar-hint">
-                    {referencePoints.length < 2
-                      ? `Click ${2 - referencePoints.length} edge${referencePoints.length === 1 ? '' : 's'} of the coin`
-                      : <><strong>{pixelScale?.toFixed(2)}</strong> px/mm</>}
+                    {referencePoints.length === 0 && 'Click one edge of the coin'}
+                    {referencePoints.length === 1 && 'Now the opposite edge'}
+                    {referencePoints.length === 2 && <>Scale set: <strong>{pixelScale?.toFixed(1)}</strong> px/mm</>}
                   </span>
                   <button className="ghost" onClick={undoActivePoints} disabled={!referencePoints.length}>Undo</button>
                   <button className="ghost" onClick={clearActivePoints} disabled={!referencePoints.length}>Clear</button>
@@ -518,7 +631,9 @@ export default function AnalyzerApp({ user }) {
               {mode === 'polygon' && (
                 <>
                   <span className="toolbar-hint">
-                    {polygonPoints.length < 3 ? 'Optional: click around the grounds to limit the analysis' : `${polygonPoints.length}-point region`}
+                    {!regionClosed
+                      ? 'Optional: outline the grounds (3+ points) or skip to Detect'
+                      : `${polygonPoints.length}-point region · click the first point to close`}
                   </span>
                   <button className="ghost" onClick={undoActivePoints} disabled={!polygonPoints.length}>Undo</button>
                   <button className="ghost" onClick={clearActivePoints} disabled={!polygonPoints.length}>Clear</button>
@@ -527,6 +642,9 @@ export default function AnalyzerApp({ user }) {
 
               {mode === 'erase' && analysisResult && (
                 <>
+                  <span className="toolbar-hint hint-erase">
+                    {erasePoints.length ? `${erasePoints.length} marked` : 'Click stray clusters to mark them · [ ] brush size'}
+                  </span>
                   <label className="toolbar-inline-field">
                     Brush
                     <input
@@ -535,34 +653,38 @@ export default function AnalyzerApp({ user }) {
                       max={500}
                       step={1}
                       value={eraseRadius}
-                      onChange={(event) => setEraseRadius(parseInt(event.target.value, 10) || 2)}
+                      onChange={(event) => setEraseRadius(Math.max(2, Math.min(500, parseInt(event.target.value, 10) || 2)))}
                     />
                     px
                   </label>
-                  <button onClick={applyErase} disabled={!erasePoints.length || busy} className="btn-primary">
-                    Remove {erasePoints.length ? `(${erasePoints.length})` : ''}
+                  <button
+                    onClick={applyErase}
+                    disabled={!erasePoints.length || busy}
+                    className="btn-primary"
+                    title={erasePoints.length ? 'Remove the marked clusters (Enter)' : 'Click particles to mark them'}
+                  >
+                    Remove{erasePoints.length ? ` (${erasePoints.length})` : ''}
                   </button>
                   <button className="ghost" onClick={clearActivePoints} disabled={!erasePoints.length}>Clear</button>
-                  <button className="ghost" onClick={() => { setRemovedIds([]); setErasePoints([]); runAnalysis() }} disabled={busy}>Reset</button>
                 </>
               )}
 
               {mode === 'view' && <span className="toolbar-hint">Drag to pan · scroll or pinch to zoom</span>}
             </div>
 
-            {analysisResult && (
-              <div className="overlay-btns" role="group" aria-label="Overlay">
-                {['original', 'threshold', 'clusters'].map((value) => (
-                  <button key={value} className={overlayMode === value ? 'active' : ''} onClick={() => setOverlayMode(value)}>
-                    {value.charAt(0).toUpperCase() + value.slice(1)}
-                  </button>
-                ))}
-              </div>
-            )}
+            <button
+              type="button"
+              className="btn-primary toolbar-primary"
+              onClick={runAnalysis}
+              disabled={detectDisabled}
+              title={detectTitle}
+            >
+              {busy && busyLabel.startsWith('Detecting') ? 'Detecting…' : runLabel}
+            </button>
           </div>
         )}
 
-        <div className="canvas-area">
+        <div className="canvas-area" aria-busy={busy ? 'true' : 'false'}>
           {imageSrc ? (
             <ImageCanvas
               imageSrc={imageSrc}
@@ -575,6 +697,10 @@ export default function AnalyzerApp({ user }) {
               eraseRadius={eraseRadius}
               onPointAdded={handlePointAdded}
               layerB64={layerB64}
+              pixelScale={pixelScale}
+              referenceMm={referencePhysicalMm}
+              onEraseRadiusChange={setEraseRadius}
+              onPolygonClose={() => say(`Region closed with ${polygonPoints.length} points.`, 'success')}
             />
           ) : (
             <div className="empty-state">
@@ -588,42 +714,113 @@ export default function AnalyzerApp({ user }) {
               <UploadActions onUpload={handleUpload} large />
             </div>
           )}
-          {busy && imageSrc && <div className="canvas-busy"><span className="spinner" />Working…</div>}
+
+          {imageSrc && analysisResult && (
+            <div
+              className="canvas-hud hud-top-left overlay-btns"
+              role="radiogroup"
+              aria-label="Overlay"
+              onKeyDown={onOverlayKey}
+            >
+              {overlayOptions.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  data-value={value}
+                  aria-checked={overlayMode === value}
+                  tabIndex={overlayMode === value ? 0 : -1}
+                  className={overlayMode === value ? 'active' : ''}
+                  onClick={() => setOverlayMode(value)}
+                >
+                  {value.charAt(0).toUpperCase() + value.slice(1)}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {busy && imageSrc && (
+            <div className="canvas-scrim">
+              <div className="busy-card" role="status">
+                <div className="busy-title"><span className="spinner" aria-hidden="true" />{busyLabel}</div>
+                <div className="busy-bar" aria-hidden="true"><i /></div>
+                <div className="busy-elapsed">{elapsed.toFixed(1)} s</div>
+              </div>
+            </div>
+          )}
+
+          {kbdOpen && (
+            <div className="kbd-backdrop" onClick={() => setKbdOpen(false)}>
+              <div
+                className="kbd-sheet"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Keyboard shortcuts"
+                tabIndex={-1}
+                ref={kbdRef}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="kbd-head">
+                  <h2>Keyboard shortcuts</h2>
+                  <button type="button" className="ghost small" onClick={() => setKbdOpen(false)} aria-label="Close shortcuts">Esc</button>
+                </div>
+                <dl>
+                  {SHORTCUTS.map(([k, d]) => (
+                    <div key={k}><dt><kbd>{k}</kbd></dt><dd>{d}</dd></div>
+                  ))}
+                </dl>
+              </div>
+            </div>
+          )}
         </div>
 
-        {status.text && <div className={`status status-${status.tone}`} role="status">{status.text}</div>}
+        <div className="status-row">
+          {status.text ? (
+            <div
+              className={`status status-${status.tone}`}
+              role={status.tone === 'error' ? 'alert' : 'status'}
+              aria-live="polite"
+            >
+              <i className="status-dot" aria-hidden="true" />
+              <span className="status-text">{status.text}</span>
+              {status.tone === 'error' && (
+                <button type="button" className="ghost small status-dismiss" aria-label="Dismiss message" onClick={() => say('')}>Dismiss</button>
+              )}
+            </div>
+          ) : <div className="status status-empty" aria-live="polite" />}
+          <button type="button" className="ghost small kbd-open" onClick={() => setKbdOpen(true)}>? Shortcuts</button>
+        </div>
       </main>
 
       {imageSrc && (
-        <aside className="results-column">
+        <aside className="results-column" aria-label="Results">
           {!analysisResult && (
             <div className="results-empty">
-              <h3>Results</h3>
-              <p>Set the scale, optionally draw a region, then run detection. Your size statistics will appear here.</p>
-              <button className="btn-primary btn-large" onClick={runAnalysis} disabled={busy}>
-                {busy ? 'Running…' : 'Run particle detection'}
+              <h3>No results yet</h3>
+              <ul className="checklist">
+                <li className={stepDone.reference ? 'done' : ''}><span aria-hidden="true">{stepDone.reference ? '☑' : '☐'}</span> Scale set</li>
+                <li className={stepDone.polygon ? 'done' : ''}><span aria-hidden="true">{stepDone.polygon ? '☑' : '☐'}</span> Region (optional)</li>
+                <li><span aria-hidden="true">☐</span> Detect</li>
+              </ul>
+              <button className="btn-primary btn-large" onClick={runAnalysis} disabled={detectDisabled} title={detectTitle}>
+                {busy && busyLabel.startsWith('Detecting') ? 'Running…' : 'Run particle detection'}
               </button>
             </div>
           )}
 
-          <ResultsPanel result={analysisResult} histogram={histogram} />
+          <ResultsPanel result={analysisResult} histogram={histogram} histogramLoading={histogramLoading} />
 
           {analysisResult && (
             <div className="results-actions">
-              {!histogram && (
-                <button onClick={fetchHistogram} disabled={busy || !analysisResult.summary}>Show histogram</button>
-              )}
-              {savedRuns.length < 3 && (
-                <button onClick={saveRun} disabled={busy}>Save run ({savedRuns.length}/3)</button>
-              )}
-              <div className={`download-menu ${downloadsOpen ? 'open' : ''}`}>
-                <button type="button" onClick={() => setDownloadsOpen((prev) => !prev)} aria-expanded={downloadsOpen}>
+              <button onClick={saveRun} disabled={busy || savedRuns.length >= 3}>Save run ({savedRuns.length}/3)</button>
+              <div className={`download-menu ${downloadsOpen ? 'open' : ''}`} ref={downloadRef}>
+                <button type="button" onClick={() => setDownloadsOpen((prev) => !prev)} aria-expanded={downloadsOpen} aria-haspopup="menu">
                   Download ▾
                 </button>
                 {downloadsOpen && (
-                  <div className="download-menu-panel">
-                    <button type="button" onClick={downloadCsv}>Particles (CSV)</button>
-                    <button type="button" onClick={downloadHistogram} disabled={!analysisResult.summary || busy}>Histogram (PNG)</button>
+                  <div className="download-menu-panel" role="menu">
+                    <button type="button" role="menuitem" onClick={downloadCsv}>Particles (CSV)</button>
+                    <button type="button" role="menuitem" onClick={downloadHistogram} disabled={!analysisResult.summary || busy}>Histogram (PNG)</button>
                   </div>
                 )}
               </div>
@@ -650,26 +847,32 @@ export default function AnalyzerApp({ user }) {
                   {savedRuns.map((run, i) => (
                     <tr key={run.label}>
                       <td><i className="run-swatch" style={{ background: SERIES_COLORS[i] }} />{run.label}</td>
-                      <td>{run.summary?.cluster_count?.toLocaleString() ?? '—'}</td>
-                      <td>{run.summary?.dv50_mm != null ? Math.round(run.summary.dv50_mm * 1000) : '—'}</td>
-                      <td>{run.summary?.fines_volume_pct != null ? `${run.summary.fines_volume_pct.toFixed(1)}%` : '—'}</td>
-                      <td>{run.summary?.diameter_mean_mm != null ? Math.round(run.summary.diameter_mean_mm * 1000) : '—'}</td>
+                      <td>{isNum(run.summary?.cluster_count) ? run.summary.cluster_count.toLocaleString() : '—'}</td>
+                      <td>{um(run.summary?.dv50_mm)}</td>
+                      <td>
+                        {run.summary?.fines_measurable === false ? 'n/a'
+                          : isNum(run.summary?.fines_volume_pct) ? `${run.summary.fines_volume_pct.toFixed(1)}%` : '—'}
+                      </td>
+                      <td>{um(run.summary?.diameter_mean_mm)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
               {savedRuns.length >= 2 && !compare && (
-                <button onClick={fetchCompareHistogram} disabled={busy}>Compare runs</button>
+                <button className="btn-primary" onClick={fetchCompareHistogram} disabled={busy}>Compare runs</button>
               )}
               {compare && (
                 <div className="histogram">
-                  <HistogramChart data={compare.series} stats={compare.per_run} scale={compare.scale ?? 1} unit={unit} />
+                  <HistogramChart data={compare.series} stats={compare.per_run} scale={cscale} unit={unit} />
                   {compare.combined && (
                     <div className="compare-summary">
-                      <div><span>Mean of means</span><strong>{+(compare.combined.mean_of_means * (compare.scale ?? 1)).toPrecision(3)} {unit}</strong></div>
-                      <div><span>Median of medians</span><strong>{+(compare.combined.median_of_medians * (compare.scale ?? 1)).toPrecision(3)} {unit}</strong></div>
-                      <div><span>Run-to-run σ</span><strong>±{+(compare.combined.std_of_means * (compare.scale ?? 1)).toPrecision(2)} {unit}</strong></div>
+                      <div><span>Mean of means</span><strong><b>{isNum(compare.combined.mean_of_means) ? sig(compare.combined.mean_of_means * cscale * toUm) : '—'}</b> {toUm === 1000 ? 'µm' : unit}</strong></div>
+                      <div><span>Median of medians</span><strong><b>{isNum(compare.combined.median_of_medians) ? sig(compare.combined.median_of_medians * cscale * toUm) : '—'}</b> {toUm === 1000 ? 'µm' : unit}</strong></div>
+                      <div><span>Run-to-run σ</span><strong>{formatSigma(isNum(compare.combined.std_of_means) ? compare.combined.std_of_means * cscale * toUm : null, toUm === 1000 ? 'µm' : unit)}</strong></div>
                     </div>
+                  )}
+                  {isNum(compare.min_diameter_um_applied) && (
+                    <p className="results-note">Common cutoff applied to every run: {Math.round(compare.min_diameter_um_applied)} µm (largest detection limit).</p>
                   )}
                   <button className="ghost small" onClick={downloadCompare} disabled={busy}>Download comparison (PNG)</button>
                 </div>

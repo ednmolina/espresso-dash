@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { REFERENCE_OBJECTS } from '../constants'
+import { REFERENCE_OBJECTS, DEFAULT_SETTINGS, LEGACY_SETTINGS, MEASUREMENT_KEYS } from '../constants'
+
+const fillStyle = (value, min, max) => ({ '--fill': `${Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100))}%` })
 
 function HelpTip({ text, label }) {
   const buttonRef = useRef(null)
@@ -70,14 +72,27 @@ function HelpTip({ text, label }) {
   )
 }
 
-export default function Sidebar({ settings, onSettingsChange, referencePreset, onPresetChange, referencePhysicalMm, onPhysicalMmChange }) {
+export default function Sidebar({ settings, onSettingsChange, referencePreset, onPresetChange, referencePhysicalMm, onPhysicalMmChange, open = false, onToggle }) {
   const set = (key) => (e) => {
     const val = e.target.type === 'checkbox' ? e.target.checked : parseFloat(e.target.value)
     onSettingsChange({ ...settings, [key]: val })
   }
+  const setStr = (key) => (e) => onSettingsChange({ ...settings, [key]: e.target.value })
+  const isLegacy = MEASUREMENT_KEYS.every((k) => settings[k] === LEGACY_SETTINGS[k])
+  const toggleLegacy = (e) => {
+    const patch = {}
+    for (const k of MEASUREMENT_KEYS) patch[k] = e.target.checked ? LEGACY_SETTINGS[k] : DEFAULT_SETTINGS[k]
+    // keep a user-entered diameter cutoff either way
+    patch.min_diameter_um = settings.min_diameter_um
+    onSettingsChange({ ...settings, ...patch })
+  }
 
   return (
-    <aside className="analyzer-sidebar">
+    <aside className={`analyzer-sidebar ${open ? 'open' : ''}`} aria-label="Settings">
+      <button type="button" className="sidebar-rail-toggle" onClick={onToggle} aria-expanded={open} aria-controls="analyzer-settings-body">
+        <span aria-hidden="true">⚙</span><span className="rail-label">Settings</span>
+      </button>
+      <div className="sidebar-body" id="analyzer-settings-body">
       <div className="sidebar-title">
         <h2>Settings</h2>
         <p>Defaults work for most photos.</p>
@@ -92,7 +107,7 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
             text="Higher values detect fewer, darker pixels. Lower values include more of the image and can merge nearby grounds."
           />
         </span>
-        <input type="range" min={1} max={100} step={0.1} value={settings.threshold_percent} onChange={set('threshold_percent')} />
+        <input type="range" style={fillStyle(settings.threshold_percent, 1, 100)} min={1} max={100} step={0.1} value={settings.threshold_percent} onChange={set('threshold_percent')} />
         <output className="range-value">{settings.threshold_percent.toFixed(1)}</output>
       </label>
 
@@ -104,7 +119,7 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
             text="Used when splitting touching particles: how dark a pixel must be (between a particle's darkest pixel and the background) to anchor a particle. Lower values split clumps more readily."
           />
         </span>
-        <input type="range" min={0} max={1} step={0.01} value={settings.reference_threshold} onChange={set('reference_threshold')} />
+        <input type="range" style={fillStyle(settings.reference_threshold, 0, 1)} min={0} max={1} step={0.01} value={settings.reference_threshold} onChange={set('reference_threshold')} />
         <output className="range-value">{settings.reference_threshold.toFixed(2)}</output>
       </label>
 
@@ -117,7 +132,7 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
             text="Lower values split touching particles more aggressively. Higher values keep borderline clusters together."
           />
         </span>
-        <input type="range" min={0.01} max={1} step={0.01} value={settings.max_cost} onChange={set('max_cost')} />
+        <input type="range" style={fillStyle(settings.max_cost, 0.01, 1)} min={0.01} max={1} step={0.01} value={settings.max_cost} onChange={set('max_cost')} />
         <output className="range-value">{settings.max_cost.toFixed(2)}</output>
       </label>
 
@@ -178,6 +193,90 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
         </select>
       </label>
 
+
+      <details className="advanced">
+        <summary>Advanced / measurement model</summary>
+        <div className="advanced-body">
+          <label className="checkbox legacy-toggle">
+            <input type="checkbox" checked={isLegacy} onChange={toggleLegacy} />
+            <span className="label-row">
+              <span>Legacy (original algorithm)</span>
+              <HelpTip
+                label="Legacy preset"
+                text="Reproduces the original analyzer: global threshold, fixed threshold level, no edge correction. Use it to compare with earlier results."
+              />
+            </span>
+          </label>
+
+          <label>
+            <span className="label-row">
+              <span>Background model</span>
+              <HelpTip label="Background model" text="Flatten uneven lighting before thresholding. 'poly4' fits a smooth 4th-order surface to the paper; 'global' assumes even light." />
+            </span>
+            <select value={settings.background_model} onChange={setStr('background_model')}>
+              <option value="poly4">Flatten lighting (poly4)</option>
+              <option value="global">Global (none)</option>
+            </select>
+          </label>
+
+          <label>
+            <span className="label-row">
+              <span>Threshold mode</span>
+              <HelpTip label="Threshold mode" text="'Half contrast' puts the edge midway between paper and particle brightness, which sizes pale or blurry grounds more accurately. 'Fixed' uses the Threshold (%) slider as is." />
+            </span>
+            <select value={settings.threshold_mode} onChange={setStr('threshold_mode')}>
+              <option value="half_contrast">Half contrast (adaptive)</option>
+              <option value="fixed">Fixed (slider value)</option>
+            </select>
+          </label>
+
+          <label className="checkbox">
+            <input type="checkbox" checked={!!settings.edge_correction} onChange={set('edge_correction')} />
+            <span className="label-row">
+              <span>Edge correction</span>
+              <HelpTip label="Edge correction" text="Weights statistics to compensate for large particles being cut off at the image or region border." />
+            </span>
+          </label>
+
+          <label>
+            <span className="label-row">
+              <span>Axis method</span>
+              <HelpTip label="Axis method" text="How particle axes are measured. Max radius is the original method; moments is based on the shape's second moments." />
+            </span>
+            <select value={settings.axis_method} onChange={setStr('axis_method')}>
+              <option value="max_radius">Max radius</option>
+              <option value="moments">Moments</option>
+            </select>
+          </label>
+
+          <label>
+            <span className="label-row">
+              <span>Volume model</span>
+              <HelpTip label="Volume model" text="Shape assumption used to turn area into volume for the volume-weighted statistics." />
+            </span>
+            <select value={settings.volume_model} onChange={setStr('volume_model')}>
+              <option value="legacy">Legacy</option>
+              <option value="spheroid">Spheroid</option>
+            </select>
+          </label>
+
+          <label>
+            <span className="label-row">
+              <span>Min diameter (µm)</span>
+              <HelpTip label="Min diameter" text="Ignore particles smaller than this in the statistics. Leave empty to use everything above the detection limit." />
+            </span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              placeholder="none"
+              value={settings.min_diameter_um ?? ''}
+              onChange={(e) => onSettingsChange({ ...settings, min_diameter_um: e.target.value === '' ? null : parseFloat(e.target.value) })}
+            />
+          </label>
+        </div>
+      </details>
+
       <h3>Reference object</h3>
 
       <label>
@@ -212,6 +311,7 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
           onChange={(e) => onPhysicalMmChange(parseFloat(e.target.value))}
         />
       </label>
+      </div>
     </aside>
   )
 }

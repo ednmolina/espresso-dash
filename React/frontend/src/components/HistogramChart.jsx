@@ -65,7 +65,7 @@ export default function HistogramChart({ data, stats = [], scale = 1, unit = 'mm
     const hi = edges[edges.length - 1]
     const t = xLog ? (v) => Math.log10(v) : (v) => v
     const x = (v) => MARGIN.left + ((t(v) - t(lo)) / (t(hi) - t(lo))) * innerW
-    const yMax = Math.max(1e-9, ...series.flatMap((s) => s.fractions)) * 1.08
+    const yMax = Math.max(1e-9, ...series.flatMap((s) => s.fractions.map((f) => f ?? 0))) * 1.08
     const yTicks = niceLinearTicks(0, yMax, 4)
     const yTop = Math.max(yMax, yTicks[yTicks.length - 1])
     const y = (v) => MARGIN.top + innerH - (v / yTop) * innerH
@@ -103,8 +103,8 @@ export default function HistogramChart({ data, stats = [], scale = 1, unit = 'mm
         ))}
         <line className="hc-axis" x1={MARGIN.left} x2={width - MARGIN.right} y1={baseY} y2={baseY} />
 
-        {/* the 16th–84th percentile band of the first series */}
-        {stats[0] && (
+        {/* the 16th–84th percentile spread of the first series (descriptive, not an error bar) */}
+        {stats[0] && Number.isFinite(stats[0].p16) && Number.isFinite(stats[0].p84) && (
           <rect className="hc-band" x={x(stats[0].p16)} width={Math.max(0, x(stats[0].p84) - x(stats[0].p16))} y={MARGIN.top} height={baseY - MARGIN.top} />
         )}
 
@@ -128,15 +128,15 @@ export default function HistogramChart({ data, stats = [], scale = 1, unit = 'mm
             })
           }
           let d = `M${x(edges[0])},${baseY}`
-          s.fractions.forEach((f, bi) => { d += ` V${y(f)} H${x(edges[bi + 1])}` })
+          s.fractions.forEach((f, bi) => { d += ` V${y(f ?? 0)} H${x(edges[bi + 1])}` })
           d += ` V${baseY}`
           return <path key={`s${si}`} d={d} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
         })}
 
         {stats.map((st, si) => (
           <g key={`m${si}`}>
-            <line className="hc-mean" x1={x(st.mean)} x2={x(st.mean)} y1={MARGIN.top} y2={baseY} stroke={multi ? SERIES_COLORS[si] : undefined} />
-            {!multi && <line className="hc-median" x1={x(st.median)} x2={x(st.median)} y1={MARGIN.top} y2={baseY} />}
+            {Number.isFinite(st.mean) && <line className="hc-mean" x1={x(st.mean)} x2={x(st.mean)} y1={MARGIN.top} y2={baseY} stroke={multi ? SERIES_COLORS[si] : undefined} />}
+            {!multi && Number.isFinite(st.median) && <line className="hc-median" x1={x(st.median)} x2={x(st.median)} y1={MARGIN.top} y2={baseY} />}
           </g>
         ))}
 
@@ -166,7 +166,7 @@ export default function HistogramChart({ data, stats = [], scale = 1, unit = 'mm
           {series.map((s, si) => (
             <span key={s.label}>
               {multi && <i style={{ background: SERIES_COLORS[si] }} />}
-              {multi ? `${s.label}: ` : ''}{(s.fractions[hover.bin] * 100).toFixed(1)}%
+              {multi ? `${s.label}: ` : ''}{((s.fractions[hover.bin] ?? 0) * 100).toFixed(1)}%
             </span>
           ))}
         </div>
@@ -175,7 +175,7 @@ export default function HistogramChart({ data, stats = [], scale = 1, unit = 'mm
       <div className="histogram-key">
         <span><i className="key-mean" />Mean</span>
         {!multi && <span><i className="key-median" />Median</span>}
-        {stats[0] && <span><i className="key-band" />16th–84th percentile</span>}
+        {stats[0] && Number.isFinite(stats[0].p16) && <span><i className="key-band" />16th–84th percentile spread</span>}
       </div>
     </div>
   )
