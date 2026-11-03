@@ -343,6 +343,7 @@ export function createEngine() {
       pixel_scale: dataset.pixel_scale,
       summary: summaryOrNone(dataset),
       shape_summary: shapeSummaryOrNone(dataset),
+      ...(result.split_info ? { split_info: result.split_info } : {}),
       particles: particlesPayload(dataset),
       analysis_scale: s,
       analysis_id: analysisId,

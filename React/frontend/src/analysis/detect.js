@@ -13,6 +13,7 @@ import { roundHalfEven } from './np.js'
 import { pow2 } from './glibcPow.js'
 import { flattenBlue, halfContrastPercent } from './background.js'
 import { edgeWeights } from './stats.js'
+import { splitTouching, unsplitDv } from './split.js'
 
 export const CONTRAST_CLUSTER_MIN_PIXELS = 150
 
@@ -465,10 +466,22 @@ export function analyzeImageBlue(blue, height, width, settings, { onProgress, fl
   }
 
   report('detect', 0)
-  const ds = detectParticles(
+  let ds = detectParticles(
     blue, height, width, thresholdMask, bg, settings, polygonMask,
     onProgress ? (f) => onProgress('detect', f) : undefined,
   )
+  let splitInfo = null
+  let ds0 = null
+  if (settings.split_touching) {
+    report('split', 0)
+    const t = performance.now()
+    const out = splitTouching(ds, settings, onProgress ? (f) => onProgress('split', f) : undefined)
+    ds0 = out.dataset === ds ? null : ds
+    ds = out.dataset
+    splitInfo = { ...out.info, ms: 0 }
+    report('split', 1)
+    splitInfo.ms = Math.round(performance.now() - t)
+  }
   report('measure', 0)
   remeasureClusters(ds, settings.axis_method, settings.volume_model)
   if (settings.edge_correction && ds.n > 0) {
@@ -489,6 +502,21 @@ export function analyzeImageBlue(blue, height, width, settings, { onProgress, fl
     axis_method: settings.axis_method,
     volume_model: settings.volume_model,
   }
+  if (splitInfo) {
+    ds.meta.split_touching = true
+    ds.meta.split_neck_ratio = Number(settings.split_neck_ratio)
+    modelInfo.split_touching = true
+    modelInfo.split_neck_ratio = Number(settings.split_neck_ratio)
+    if (ds0) {
+      // Dv at detection (what a run with the split off reports); the extra measurement counts as 'measure'.
+      remeasureClusters(ds0, settings.axis_method, settings.volume_model)
+      if (settings.edge_correction && ds0.n > 0) ds0.edge_weight = edgeWeights(ds0, [height, width], polygonMask)
+      ds0.pixel_scale = settings.pixel_scale
+      ds0.meta = { ...ds.meta }
+    }
+    splitInfo.unsplit = unsplitDv(ds0 ?? ds)
+    ds0 = null
+  }
   report('measure', 1)
 
   return {
@@ -500,6 +528,7 @@ export function analyzeImageBlue(blue, height, width, settings, { onProgress, fl
     model_info: modelInfo,
     flatten_info: flattenInfo,
     dataset: ds,
+    split_info: splitInfo,
   }
 }
 

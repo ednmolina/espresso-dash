@@ -43,6 +43,7 @@ export function mergeErase(prev, data, removedIds) {
     cluster_layer_b64: next.cluster_layer_b64 ?? next.cluster_overlay_b64 ?? base.cluster_layer_b64 ?? base.cluster_overlay_b64 ?? null,
     nclusters: next.nclusters ?? base.nclusters,
     summary: next.summary !== undefined ? next.summary : base.summary,
+    shape_summary: next.shape_summary !== undefined ? next.shape_summary : base.shape_summary,
     particles,
   }
 }
@@ -103,6 +104,21 @@ export function normalizeSummary(summary) {
     finesMeasurable: !legacy && s.fines_measurable !== false && finesPct != null,
     limitUm: num(s.detection_limit_um),
     raw: summary ?? null,
+  }
+}
+
+/**
+ * Normalised view of the analyze/erase `shape_summary` (aspect-ratio statistics of the
+ * measured ellipses). null when absent or without a median.
+ */
+export function normalizeShape(s) {
+  if (!s || !isNum(s.aspect_ratio_median)) return null
+  const num = (v) => (isNum(v) ? v : null)
+  return {
+    arMedian: s.aspect_ratio_median,
+    arP10: num(s.aspect_ratio_p10),
+    arP90: num(s.aspect_ratio_p90),
+    n: num(s.aspect_ratio_n),
   }
 }
 
