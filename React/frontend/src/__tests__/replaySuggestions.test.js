@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+// GrindSuggestionsCard -> pageCharts -> dashboardData -> firestore -> firebase.js
+// needs a real API key; CI has none. Same stub as dashboardData.test.js.
+vi.mock('../firestore', () => ({ db: {} }))
 import { indexToSetting } from '../grindCalibration'
 import { LIMITS, buildForecastModel, replaySuggestions } from '../forecastModel'
 import { directionText, grindSuggestionsSubtitle } from '../components/diagnostics/GrindSuggestionsCard'
