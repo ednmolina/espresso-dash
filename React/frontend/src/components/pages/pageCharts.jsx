@@ -363,7 +363,7 @@ export function PredActualChart({ points = [], height = 240, testId = 'diag-scat
 
 export function ErrorTimeChart({ points = [], baselineMae, firstHalfMae, lastHalfMae, halfSize = 0, height = 220, testId = 'diag-error-time-chart' }) {
   const [tip, setTip] = useState(null)
-  const m = { l: 40, r: 10, t: 10, b: 30 }
+  const m = { l: 56, r: 10, t: 10, b: 30 }
   const maxErr = Math.max(...points.map((p) => p.absError).filter(finite), baselineMae || 0, 0.5)
   const yHi = maxErr * 1.1
   const ticks = niceTicks(0, yHi, 4)
@@ -377,7 +377,7 @@ export function ErrorTimeChart({ points = [], baselineMae, firstHalfMae, lastHal
         const bx = (i) => m.l + step * i + step / 2
         return (
           <>
-            <YAxis ticks={ticks} y={sy} left={m.l} right={w - m.r} format={(t) => `${t.label}%`} />
+            <YAxis ticks={ticks} y={sy} left={m.l} right={w - m.r} format={(t) => `${t.label} pts`} />
             <g className="el-axis">
               {points.length ? <text x={bx(0)} y={height - m.b + 15} textAnchor="start">Shot {points[0].order + 1}</text> : null}
               {points.length > 2 ? <text x={bx(Math.floor(n / 2))} y={height - m.b + 15} textAnchor="middle">Shot {points[Math.floor(n / 2)].order + 1}</text> : null}
@@ -394,7 +394,7 @@ export function ErrorTimeChart({ points = [], baselineMae, firstHalfMae, lastHal
                     width={step}
                     height={height - m.b - m.t}
                     fill="transparent"
-                    onPointerEnter={() => setTip({ x: bx(i), y: sy(p.absError), title: `Shot ${p.order + 1} · ${p.date}`, detail: `Missed by ${p.absError.toFixed(2)}%` })}
+                    onPointerEnter={() => setTip({ x: bx(i), y: sy(p.absError), title: `Shot ${p.order + 1} · ${p.date}`, detail: `Missed by ${p.absError.toFixed(2)} pts` })}
                   />
                 </g>
               )

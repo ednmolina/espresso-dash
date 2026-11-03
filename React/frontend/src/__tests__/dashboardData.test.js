@@ -23,6 +23,7 @@ const {
   addShotToFirestore,
   buildDashboardPayload,
   buildExperimentPayload,
+  fetchShotsFromServer,
   parsePhInput,
   updateShotCellInFirestore,
 } = await import('../dashboardData')
@@ -169,5 +170,18 @@ describe('buildExperimentPayload', () => {
     const withPh = shots(16, (i) => ({ ph: 5 + (i % 5) * 0.2 }))
     expect(buildExperimentPayload(withPh, { ph: '' }).similar_successes).toEqual(base)
     expect(buildExperimentPayload(withPh, { ph: '5.8' }).similar_successes).not.toEqual(base)
+  })
+})
+
+describe('unrated shots', () => {
+  it('are flagged rated:false without changing their stored rating value', async () => {
+    const docs = [
+      { id: 'a', data: () => ({ date: '2025-01-01' }) },
+      { id: 'b', data: () => ({ date: '2025-01-02', rating: 0 }) },
+      { id: 'c', data: () => ({ date: '2025-01-03', 'Rating Label': 'Great' }) },
+    ]
+    mocks.getDocsFromServer.mockResolvedValueOnce({ metadata: { fromCache: false }, docs })
+    const { shots: loaded } = await fetchShotsFromServer()
+    expect(loaded.map((s) => [s.rating, s.rated])).toEqual([[0, false], [0, true], [2, true]])
   })
 })

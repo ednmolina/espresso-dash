@@ -104,8 +104,8 @@ export default function DiagnosticsPage() {
       <div>
         <h2>{beats ? 'The forecast beats guessing your average' : "The forecast doesn't beat guessing your average yet"}</h2>
         <p>
-          Each of {bt.evaluated} past shots was predicted using only the shots before it. It missed by {f1(bt.model.mae)}% on average.
-          Always guessing your average would miss by {f1(bt.baseline.mae)}%
+          Each of {bt.evaluated} past shots was predicted using only the shots before it. It missed by {f1(bt.model.mae)} pts on average.
+          Always guessing your average would miss by {f1(bt.baseline.mae)} pts
           {beats ? `, so the forecast cuts the error by ${Math.round(bt.improvementPct)}%.` : ', so the forecast does not cut the error yet. More logged shots should help.'}
         </p>
       </div>
@@ -124,11 +124,11 @@ export default function DiagnosticsPage() {
       testId="diag-mae"
       label="Typical miss (MAE)"
       value={f1(bt.model.mae)}
-      unit="%"
+      unit=" pts"
       hint="Lower is better"
       rows={[
-        { label: 'Forecast', meter: bt.model.mae, max: Math.max(bt.model.mae, bt.baseline.mae) * 1.2, text: `${f1(bt.model.mae)}%`, tone: 'accent' },
-        { label: 'Always your average', meter: bt.baseline.mae, max: Math.max(bt.model.mae, bt.baseline.mae) * 1.2, text: `${f1(bt.baseline.mae)}%`, tone: 'grey' },
+        { label: 'Forecast', meter: bt.model.mae, max: Math.max(bt.model.mae, bt.baseline.mae) * 1.2, text: `${f1(bt.model.mae)} pts`, tone: 'accent' },
+        { label: 'Always your average', meter: bt.baseline.mae, max: Math.max(bt.model.mae, bt.baseline.mae) * 1.2, text: `${f1(bt.baseline.mae)} pts`, tone: 'grey' },
       ]}
     />,
     <Tile
@@ -145,7 +145,7 @@ export default function DiagnosticsPage() {
     <Tile
       key="within"
       testId="diag-within"
-      label="Within ±1% of actual"
+      label="Within ±1 pt of actual"
       value={Math.round(bt.model.within1 * 100)}
       unit="%"
       hint={`${within} of ${bt.evaluated} shots`}
@@ -161,9 +161,9 @@ export default function DiagnosticsPage() {
     <>
       <PredActualChart points={bt.points} testId="diag-scatter-chart" />
       <ChartLegend items={[
-        { label: 'Within ±1%', type: 'dot', cls: 'el-pt-photo' },
+        { label: 'Within ±1 pt', type: 'dot', cls: 'el-pt-photo' },
         { label: 'Missed by more', type: 'ring', cls: 'el-pt-miss' },
-        { label: '±1% band', type: 'band', cls: 'el-band' },
+        { label: '±1 pt band', type: 'band', cls: 'el-band' },
         { label: 'Perfect', type: 'dash', cls: 'el-diagonal' },
       ]}
       />
@@ -182,7 +182,7 @@ export default function DiagnosticsPage() {
       ]}
       />
       <p className="el-footnote">
-        {halfImproving ? 'Improving as you log more' : 'Not improving yet'}: first {bt.halfSize} shots missed by {f2(bt.firstHalfMae)}%, last {bt.halfSize} by {f2(bt.lastHalfMae)}%.
+        {halfImproving ? 'Improving as you log more' : 'Not improving yet'}: first {bt.halfSize} shots missed by {f2(bt.firstHalfMae)} pts, last {bt.halfSize} by {f2(bt.lastHalfMae)} pts.
       </p>
     </>
   ) : <p className="muted">{emptyText}</p>
@@ -306,8 +306,8 @@ export default function DiagnosticsPage() {
   /* ------------------------------ phone ------------------------------ */
   if (phone) {
     const rows = [
-      { id: 'scatter', title: 'Predicted vs actual', sub: bt ? `${within} of ${bt.evaluated} within ±1%` : 'Not measured yet', body: scatterBody, testId: 'diag-scatter' },
-      { id: 'errors', title: 'Error over time', sub: bt ? `${halfImproving ? 'Improving' : 'Not improving yet'}: ${f2(bt.firstHalfMae)}% to ${f2(bt.lastHalfMae)}%` : 'Not measured yet', body: errorsBody, testId: 'diag-error-time' },
+      { id: 'scatter', title: 'Predicted vs actual', sub: bt ? `${within} of ${bt.evaluated} within ±1 pt` : 'Not measured yet', body: scatterBody, testId: 'diag-scatter' },
+      { id: 'errors', title: 'Error over time', sub: bt ? `${halfImproving ? 'Improving' : 'Not improving yet'}: ${f2(bt.firstHalfMae)} to ${f2(bt.lastHalfMae)} pts` : 'Not measured yet', body: errorsBody, testId: 'diag-error-time' },
       { id: 'rating', title: 'Rating calibration', sub: bestBin ? `Said ${Math.round(bestBin.predicted * 100)}% Great, ${Math.round(bestBin.observed * 100)}% came true` : 'Not measured yet', body: ratingBody, testId: 'diag-rating-cal' },
       { id: 'inputs', title: 'Which inputs matter', sub: ranked[0] ? `${ranked[0].label} matters most` : 'No tested inputs yet', body: importanceBody, testId: 'diag-importance' },
       { id: 'coverage', title: 'Data coverage', sub: coverage.ph52.count ? `${coverage.ph52.count} shots may have a default pH` : `pH on ${coverage.ph.count} of ${total} shots`, body: coverageBody, testId: 'diag-coverage' },
@@ -320,7 +320,7 @@ export default function DiagnosticsPage() {
         {bt ? (
           <p className="el-headline-line" data-testid="diag-headline">
             <span className={`el-headline-icon is-small ${beats ? 'is-good' : 'is-warn'}`} aria-hidden="true">{beats ? '✓' : '!'}</span>
-            {beats ? 'Beats' : "Doesn't beat"} guessing your average: {f1(bt.model.mae)}% vs {f1(bt.baseline.mae)}%
+            {beats ? 'Beats' : "Doesn't beat"} guessing your average: {f1(bt.model.mae)} vs {f1(bt.baseline.mae)} pts
           </p>
         ) : (
           <div className="el-empty" data-testid="diag-empty"><p className="el-empty-title">Accuracy is not measured yet.</p><p>{emptyText}</p></div>

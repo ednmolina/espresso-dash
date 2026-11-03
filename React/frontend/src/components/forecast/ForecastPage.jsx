@@ -30,6 +30,12 @@ function skippedText(model, item) {
   return `${label} skipped`
 }
 
+function intervalNote(model, keys) {
+  const names = keys.map((key) => model?.features?.find((f) => f.key === key)?.label ?? key)
+  const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]
+  return `${list} ${names.length > 1 ? 'were' : 'was'}n't entered`
+}
+
 function Stepper({ label, value, onChange, step, min = 0, suffix = 'g', testId }) {
   const n = num(value)
   const bump = (d) => onChange(String(Math.max(min, Math.round(((n ?? 0) + d) * 100) / 100)))
@@ -151,9 +157,14 @@ export default function ForecastPage() {
       <p>
         Based on {fc?.coffeeShots ?? 0} shots of this coffee.{' '}
         {finite(mae)
-          ? `Tested on your past shots, forecasts were off by ${mae.toFixed(1)}% on average.`
+          ? `Tested on your past shots, forecasts were off by ${mae.toFixed(1)} pts on average.`
           : 'Accuracy not measured yet.'}
       </p>
+      {fc?.intervalReduced?.length ? (
+        <p data-testid="forecast-range-note">
+          Range is wider because {intervalNote(model, fc.intervalReduced)}.
+        </p>
+      ) : null}
       {skipped.length ? (
         <ul className="el-skipped" data-testid="forecast-skipped">
           {skipped.map((item) => <li key={item.key}>{skippedText(model, item)}</li>)}
@@ -244,7 +255,7 @@ export default function ForecastPage() {
           <ListRow title="Show curve" detail={available ? 'Extraction by grind' : 'Not ready'} onClick={() => setSheet('curve')} testId="forecast-curve-row" />
           <ListRow
             title="Forecast accuracy"
-            detail={finite(mae) ? `off by ${mae.toFixed(1)}% on average` : 'Not measured yet'}
+            detail={finite(mae) ? `off by ${mae.toFixed(1)} pts on average` : 'Not measured yet'}
             onClick={() => go('diagnostics')}
             testId="forecast-accuracy-row"
           />

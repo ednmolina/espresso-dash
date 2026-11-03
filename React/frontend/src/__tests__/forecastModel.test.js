@@ -11,6 +11,7 @@ import {
   fitRidge,
   forecast,
   listCoffees,
+  resolveUsed,
   runBacktest,
   suggestGrind,
   sweepGrind,
@@ -343,5 +344,145 @@ describe('helpers', () => {
     const cov = dataCoverage(shots, { calibration: cal })
     expect(cov).toMatchObject({ total: 5, withExtraction: 5, grindMeasured: 1, grindEstimated: 3, tds: 2, doseYield: 4 })
     expect(dataCoverage(shots).grindEstimated).toBe(0)
+  })
+})
+
+describe('out-of-sample reporting', () => {
+  const noisy = (n, seed) => {
+    const r = rng(seed)
+    return makeShots(n, (i) => ({
+      ph: i % 2 ? 5 + Math.round(r() * 80) / 100 : null,
+      extraction: 20 + gauss(r),
+    }), seed)
+  }
+
+  it('re-selects features per fold from earlier rows only', () => {
+    const model = buildForecastModel(syntheticLinear(60).shots)
+    const folds = []
+    const bt = runBacktest(model._btRows, null, { nested: true, onSelect: (seen, test) => folds.push([seen, test]) })
+    expect(folds).toHaveLength(bt.evaluated)
+    folds.forEach(([seen, test]) => {
+      expect(Math.max(...seen)).toBeLessThan(test)
+      expect(seen).toHaveLength(test)
+    })
+    expect(bt.points.map((p) => p.selected)).toHaveLength(bt.evaluated)
+  })
+
+  it('a fold never changes when row i or later is altered', () => {
+    const { shots } = syntheticLinear(60)
+    const k = 35
+    const altered = shots.map((s, i) => (i >= k ? { ...s, extraction: s.extraction + 50 * (i % 2 ? 1 : -1), ph: 5.5, rating: 2 } : s))
+    const a = runBacktest(buildForecastModel(shots)._btRows, null, { nested: true })
+    const b = runBacktest(buildForecastModel(altered)._btRows, null, { nested: true })
+    const upTo = a.points.filter((p) => p.order <= k)
+    expect(upTo.length).toBeGreaterThan(10)
+    upTo.forEach((p, i) => {
+      expect(b.points[i].predicted).toBe(p.predicted)
+      expect(b.points[i].selected).toEqual(p.selected)
+    })
+    expect(b.points.find((p) => p.order === k + 5).predicted).not.toBe(a.points.find((p) => p.order === k + 5).predicted)
+  })
+
+  it('does not look better than a fixed-set backtest on pure noise', () => {
+    const model = buildForecastModel(noisy(80, 3))
+    const fixed = runBacktest(model._btRows, model.selected)
+    expect(model.backtest.model.mae).toBeGreaterThanOrEqual(fixed.model.mae - 1e-9)
+    // noise cannot beat the plain running mean by a wide margin once selection is nested
+    expect(model.backtest.improvementPct).toBeLessThan(10)
+  })
+
+  it('builds 200 shots in under 200ms', () => {
+    const { shots } = syntheticLinear(200)
+    const t0 = performance.now()
+    const model = buildForecastModel(shots)
+    expect(performance.now() - t0).toBeLessThan(200)
+    expect(model.backtest.evaluated).toBe(192)
+  })
+
+  it('scores grind on the setting index so a calibration cannot leak into the backtest', () => {
+    const { shots } = syntheticLinear(40)
+    const runs = [40, 80, 120, 160, 200].map((x, i) => ({ id: `r${i}`, grindSetting: indexToSetting(x), mean_um: 300 * Math.exp(0.01 * x) }))
+    const runs2 = runs.map((r, i) => ({ ...r, mean_um: r.mean_um * (i % 2 ? 1.4 : 0.8) }))
+    const calA = { mean: buildCalibration(shots, runs, []).mean }
+    const calB = { mean: buildCalibration(shots, runs2, []).mean }
+    const a = buildForecastModel(shots, { calibration: calA })
+    const b = buildForecastModel(shots, { calibration: calB })
+    expect(a.grindBasis).toBe('um')
+    expect(a._rows.some((r) => r.grind !== r.grindIndex)).toBe(true)
+    expect(a._btRows.every((r) => r.grind === r.grindIndex)).toBe(true)
+    expect(JSON.stringify(a.backtest)).toBe(JSON.stringify(b.backtest))
+    expect(JSON.stringify(a.backtest)).toBe(JSON.stringify(buildForecastModel(shots).backtest))
+  })
+})
+
+describe('interval with missing inputs', () => {
+  it('is at least as wide as the full-input interval and says why', () => {
+    const r = rng(5)
+    const shots = makeShots(80, (i) => {
+      const latent = 5.0 + r() * 0.8
+      return { ph: Math.round(latent * 100) / 100, extraction: 20 + 6 * (latent - 5.4) + 0.1 * gauss(r) }
+    })
+    const model = buildForecastModel(shots)
+    expect(model.selected).toContain('ph')
+    const full = forecast(model, planned({ ph: 5.4 }))
+    const reduced = forecast(model, planned())
+    expect(full.intervalReduced).toBeNull()
+    expect(reduced.intervalReduced).toEqual(['ph'])
+    expect(reduced.featuresSkipped).toContainEqual({ key: 'ph', reason: 'not_entered' })
+    expect(reduced.high - reduced.low).toBeGreaterThanOrEqual(full.high - full.low)
+    // without pH the model misses by roughly the pH signal, so the range must grow a lot
+    expect(reduced.high - reduced.low).toBeGreaterThan(3 * (full.high - full.low))
+  })
+
+  it('also widens the RMSE interval', () => {
+    const r = rng(8)
+    const shots = makeShots(16, () => ({}))
+    shots.forEach((s) => { s.ph = 5 + r(); s.extraction = 20 + 6 * (s.ph - 5.5) })
+    const model = buildForecastModel(shots)
+    expect(model.backtest.evaluated).toBe(8)
+    const reduced = forecast(model, planned())
+    const full = forecast(model, planned({ ph: 5.5 }))
+    expect(model.selected).toContain('ph')
+    expect(reduced.interval).toBe('rmse')
+    expect(reduced.intervalReduced).toEqual(['ph'])
+    expect(reduced.high - reduced.low).toBeGreaterThanOrEqual(full.high - full.low)
+  })
+})
+
+describe('unrated shots', () => {
+  it('stay out of rating probabilities, priors and calibration', () => {
+    const shots = makeShots(30, (i) => (i < 12 ? { rating: 0, rated: false } : { rating: 2, rated: true }))
+    const model = buildForecastModel(shots)
+    expect(model.ratingPrior).toEqual({ bad: 0, good: 0, great: 1 })
+    const f = forecast(model, planned())
+    expect(f.ratingLabel).toBe('Great')
+    expect(f.probabilities.bad).toBeLessThan(0.01)
+    // rows 8..29 are evaluated; only the 18 rated ones count for rating metrics
+    expect(model.backtest.evaluated).toBe(22)
+    expect(model.backtest.rating.evaluated).toBe(18)
+    expect(model.backtest.rating.calibration.reduce((s, b) => s + b.count, 0)).toBe(18)
+  })
+
+  it('treats shots without a rated flag as rated and copes with none rated', () => {
+    const model = buildForecastModel(makeShots(20, () => ({ rating: 0 })))
+    expect(model.ratingPrior.bad).toBe(1)
+    const none = buildForecastModel(makeShots(20, () => ({ rating: 0, rated: false })))
+    expect(none.backtest.rating).toEqual({ evaluated: 0, balancedAccuracy: null, brier: null, calibration: [] })
+    const p = forecast(none, planned()).probabilities
+    expect(p.bad + p.good + p.great).toBeCloseTo(1, 10)
+    expect(p.bad).toBeCloseTo(p.great, 10)
+  })
+})
+
+describe('resolveUsed', () => {
+  it('drops the sparsest input, not the last one listed', () => {
+    const train = Array.from({ length: 30 }, (_, i) => ({
+      a: i, b: i < 5 ? i : null, c: i,
+    }))
+    const target = { a: 1, b: 1, c: 1 }
+    // b is first in the list, so dropping "the last" would remove c instead
+    const { used, rowsOk } = resolveUsed(train, ['b', 'a', 'c'], target)
+    expect(used).toEqual(['a', 'c'])
+    expect(rowsOk).toHaveLength(30)
   })
 })

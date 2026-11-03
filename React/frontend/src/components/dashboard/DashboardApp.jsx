@@ -846,7 +846,7 @@ export default function DashboardApp() {
               <MetricCard label="Model rows" value={experiment.metrics.rows} />
               <MetricCard label="Typical miss (MAE)" value={backtest ? formatNumber(backtest.mae) : '—'} unit={backtest ? ' pts' : undefined} />
               <MetricCard label="Always your average" value={backtest ? formatNumber(backtest.baselineMae) : '—'} unit={backtest ? ' pts' : undefined} />
-              <MetricCard label="Within ±1%" value={backtest ? formatPercent(backtest.within1) : '—'} />
+              <MetricCard label="Within ±1 pt" value={backtest ? formatPercent(backtest.within1) : '—'} />
             </section>
             <p className="dashboard-note">
               {backtest ? null : <>Accuracy is measured once you have 13 shots. </>}

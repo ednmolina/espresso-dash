@@ -147,6 +147,13 @@ function ratingToNumber(value) {
   return Math.max(0, RATING_LABELS.indexOf(value))
 }
 
+// True when the record carries a real rating (number or a known label). Records saved
+// without one read as 0 ("Bad") but must not count as a Bad shot in the forecast model.
+function hasRating(value) {
+  if (typeof value === 'number') return Number.isFinite(value)
+  return RATING_LABELS.includes(value)
+}
+
 function safeDateSort(a, b) {
   return (a.date || '').localeCompare(b.date || '')
 }
@@ -226,6 +233,7 @@ function normalizeShot(raw, id) {
     time,
     extraction,
     rating: ratingToNumber(raw.rating ?? raw.Rating ?? raw['Rating Label']),
+    rated: raw.rated === false ? false : hasRating(raw.rating ?? raw.Rating ?? raw['Rating Label']),
     updatedAt: formatDateString(raw.updatedAt) || raw.updatedAt || null,
     createdAt: formatDateString(raw.createdAt) || raw.createdAt || null,
   }
