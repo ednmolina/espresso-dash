@@ -3,8 +3,9 @@
 import { test, expect } from '@playwright/test'
 import {
   openAnalyzer, uploadFixture, clickImage, setScale, setScaleAndArea, useWholePhoto, drawArea, trackErrors,
-  engineLogLength, waitForEngineOp, waitForAutoDetect, cdpTap, cdpPinch, horizontalOverflow,
+  engineLogLength, engineStarts, waitForEngineOp, waitForAutoDetect, detect, cdpTap, cdpPinch, horizontalOverflow,
 } from './helpers.js'
+import { installOldApi } from './stubs/oldApi.js'
 
 const VIEWPORTS = [
   { name: 'desktop', width: 1440, height: 900 },
@@ -13,8 +14,19 @@ const VIEWPORTS = [
 ]
 
 const step = (page, id) => page.locator(`.step[data-step=${id}]`)
-/** Number of 'analyze' entries in the engine log: any detection ever started. */
-const analyzeCount = (page) => page.evaluate(() => (window.__grindEngineLog || []).filter((e) => e.op === 'analyze').length)
+/**
+ * Number of detections STARTED (dev-only window.__grindEngineStarts, counted when the app calls the engine, not
+ * when one finishes): an attempt that is still running or that failed counts too.
+ */
+const analyzeCount = (page) => engineStarts(page, 'analyze')
+/** Neither a detection nor a threshold preview was ever started. */
+const expectNoDetection = async (page) => {
+  expect(await engineStarts(page, 'analyze'), 'analyze started').toBe(0)
+  expect(await engineStarts(page, 'thresholdPreview'), 'thresholdPreview started').toBe(0)
+}
+const AREA_STALE = 'Area changed — close it to update'
+// by text, not role: on a phone the sheet body is visibility:hidden while the results are a one-line peek
+const saveRun = (page) => page.locator('button', { hasText: /^Save run/ })
 const noResultsYet = async (page) => {
   await expect(page.locator('.stat-hero-value')).toHaveCount(0)
   await expect(page.locator('.results-count')).toHaveCount(0)
@@ -45,7 +57,7 @@ for (const vp of VIEWPORTS) {
 
       // give an (unwanted) auto-detection time to start: nothing may run
       await page.waitForTimeout(800)
-      expect(await analyzeCount(page)).toBe(0)
+      await expectNoDetection(page)
       await noResultsYet(page)
       await expect(page.locator('.canvas-area[aria-busy="true"]')).toHaveCount(0)
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0)
@@ -61,7 +73,7 @@ for (const vp of VIEWPORTS) {
       await page.keyboard.press('4')
       await page.keyboard.press('5')
       await page.waitForTimeout(600)
-      expect(await analyzeCount(page)).toBe(0)
+      await expectNoDetection(page)
       await expect(step(page, 'polygon')).toHaveAttribute('aria-current', 'step')
       await noResultsYet(page)
       if (vp.width > 640) await expect(page.getByRole('button', { name: /Run particle detection/ })).toBeDisabled()
@@ -70,7 +82,7 @@ for (const vp of VIEWPORTS) {
       await clickTwoPoints(page)
       await page.keyboard.press('Enter')
       await page.waitForTimeout(400)
-      expect(await analyzeCount(page)).toBe(0)
+      await expectNoDetection(page)
       await expect(step(page, 'threshold')).toBeDisabled()
     })
 
@@ -170,7 +182,7 @@ for (const vp of VIEWPORTS) {
       await cdpPinch(page, cdp, centre.x, centre.y + 30)
       await undo.click()
       await expect(undo).toBeDisabled() // the pinch added nothing: one tap, one point
-      expect(await analyzeCount(page)).toBe(0)
+      await expectNoDetection(page)
     })
 
     test('Undo and Clear edit the outline; a drawn area can be undone back to nothing', async ({ page }) => {
@@ -186,7 +198,190 @@ for (const vp of VIEWPORTS) {
       await page.getByTestId('area-clear').click()
       await expect(page.getByTestId('area-undo')).toBeDisabled()
       await expect(page.getByTestId('area-clear')).toBeDisabled()
-      expect(await analyzeCount(page)).toBe(0)
+      await expectNoDetection(page)
+    })
+
+    test('reopening the area after a detection: results are outdated, Save run and Threshold are off, nothing detects', async ({ page }) => {
+      const errors = trackErrors(page)
+      await openAnalyzer(page)
+      await uploadFixture(page)
+      await setScaleAndArea(page, { area: 'whole' })
+      await waitForAutoDetect(page)
+      await expect(saveRun(page)).toBeEnabled()
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-current', 'step')
+      const started = await analyzeCount(page)
+      expect(started).toBe(1)
+
+      // the reported repro: press 3, tap one point
+      await page.keyboard.press('3')
+      await expect(step(page, 'polygon')).toHaveAttribute('aria-current', 'step')
+      await clickImage(page, 150, 150)
+      await expect(page.getByTestId('area-undo')).toBeEnabled()
+
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-disabled', 'true')
+      await expect(step(page, 'threshold')).not.toHaveClass(/done/)
+      await expect(step(page, 'threshold')).not.toContainText('(done)')
+      await expect(step(page, 'erase')).toHaveAttribute('aria-disabled', 'true')
+      await expect(step(page, 'polygon')).not.toHaveClass(/done/)
+      // the old numbers are still there but say (in words) that they are outdated
+      await expect(page.getByTestId('stale-note')).toHaveText(AREA_STALE)
+      if (vp.name === 'phone') await expect(page.getByTestId('stale-tag')).toBeVisible()
+      else await expect(page.getByTestId('stale-note')).toBeVisible()
+      await expect(saveRun(page)).toBeDisabled()
+      await expect(page.getByTestId('save-run-reason')).toHaveText(AREA_STALE)
+      await expect(page.locator('button', { hasText: /^Download/ })).toBeDisabled()
+      await expect(page.getByTestId('save-calibration')).toBeDisabled()
+      await page.waitForTimeout(600)
+      expect(await analyzeCount(page)).toBe(started)
+      expect(await engineStarts(page, 'thresholdPreview')).toBe(0)
+
+      // closing the outline refreshes the results; only then is everything back
+      const from = await engineLogLength(page)
+      await clickImage(page, 480, 150)
+      await clickImage(page, 480, 330)
+      await clickImage(page, 150, 150)
+      await waitForAutoDetect(page, from)
+      await expect(page.getByTestId('stale-note')).toHaveCount(0)
+      await expect(saveRun(page)).toBeEnabled()
+      await expect(step(page, 'polygon')).toHaveClass(/done/)
+      expect(await analyzeCount(page)).toBe(started + 1)
+      expect(errors).toEqual([])
+    })
+
+    test('Esc on a closed outline after a result also marks the results outdated; Undo brings the outline back without detecting', async ({ page }) => {
+      await openAnalyzer(page)
+      await uploadFixture(page)
+      await setScale(page)
+      await drawArea(page)
+      await waitForAutoDetect(page)
+      await page.keyboard.press('3')
+      await page.keyboard.press('Escape')
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-disabled', 'true')
+      await expect(page.getByTestId('stale-note')).toHaveText(AREA_STALE)
+      await expect(saveRun(page)).toBeDisabled()
+      await expect(page.getByTestId('restore-area')).toBeVisible()
+      const started = await analyzeCount(page)
+
+      await page.getByTestId('area-undo').click() // "Undo last point" restores the cleared outline
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-current', 'step')
+      await expect(page.getByTestId('stale-note')).toHaveCount(0)
+      await expect(saveRun(page)).toBeEnabled() // the same inputs as the result: nothing to detect again
+      await page.waitForTimeout(500)
+      expect(await analyzeCount(page)).toBe(started)
+      await expect(page.getByTestId('restore-area')).toHaveCount(0)
+    })
+
+    test('Use whole photo keeps a closed outline for Undo', async ({ page }) => {
+      await openAnalyzer(page)
+      await uploadFixture(page)
+      await setScale(page)
+      await drawArea(page)
+      await waitForAutoDetect(page)
+      let from = await engineLogLength(page)
+      await page.keyboard.press('3')
+      await page.getByTestId('whole-photo').click()
+      await waitForEngineOp(page, 'analyze', from)
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-current', 'step')
+      await expect(page.getByTestId('restore-area')).toBeVisible()
+
+      from = await engineLogLength(page)
+      await page.getByTestId('restore-area').click() // Undo: the outline is the area again and detects
+      await waitForEngineOp(page, 'analyze', from)
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-current', 'step')
+      await expect(page.getByTestId('restore-area')).toHaveCount(0)
+      await page.keyboard.press('3')
+      await expect(page.getByTestId('area-hint')).toContainText('3-point area')
+      expect(await analyzeCount(page)).toBe(3)
+    })
+
+    test('Enter in Area with an open outline after a result does nothing', async ({ page }) => {
+      await openAnalyzer(page)
+      await uploadFixture(page)
+      await setScale(page)
+      await drawArea(page)
+      await waitForAutoDetect(page)
+      const started = await analyzeCount(page)
+      await page.keyboard.press('3')
+      await page.getByTestId('area-undo').click() // the outline is open again (2 points)
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-disabled', 'true')
+      await page.locator('canvas').first().focus()
+      await page.keyboard.press('Enter')
+      await page.keyboard.press('4')
+      await page.keyboard.press('5')
+      await page.waitForTimeout(700)
+      expect(await analyzeCount(page)).toBe(started)
+      expect(await engineStarts(page, 'thresholdPreview')).toBe(0)
+      await expect(step(page, 'polygon')).toHaveAttribute('aria-current', 'step')
+      await expect(page.getByTestId('stale-note')).toHaveText(AREA_STALE)
+    })
+
+    test('changing Settings before the area is chosen does not detect', async ({ page }) => {
+      await openAnalyzer(page)
+      await uploadFixture(page)
+      await setScale(page)
+      await page.getByTestId('settings-open').click()
+      await page.getByTestId('split-toggle').check()
+      await page.waitForTimeout(800)
+      await expectNoDetection(page)
+      await expect(step(page, 'polygon')).toHaveAttribute('aria-current', 'step')
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-disabled', 'true')
+      await noResultsYet(page)
+    })
+
+    test('a disabled step stays focusable, explains itself, and does nothing when activated', async ({ page }) => {
+      await openAnalyzer(page)
+      await uploadFixture(page)
+      await setScale(page)
+      const threshold = step(page, 'threshold')
+      await expect(threshold).toHaveAttribute('aria-disabled', 'true')
+      await expect(threshold).not.toHaveAttribute('disabled', /.*/)
+      const reasonId = await threshold.getAttribute('aria-describedby')
+      expect(reasonId).toBeTruthy()
+      await expect(page.locator(`#${reasonId}`)).toHaveText('Select the area first')
+      await threshold.focus()
+      await expect(threshold).toBeFocused()
+      await page.keyboard.press('Enter')
+      await page.keyboard.press('Space')
+      await threshold.click({ force: true })
+      await page.waitForTimeout(500)
+      await expect(step(page, 'polygon')).toHaveAttribute('aria-current', 'step')
+      await expectNoDetection(page)
+      // the scale step is done: assistive tech hears it
+      await expect(step(page, 'reference')).toContainText('(done)')
+      if (vp.width > 640) {
+        const run = page.getByRole('button', { name: /Run particle detection/ })
+        await expect(run).toHaveAttribute('aria-disabled', 'true')
+        await expect(page.locator(`#${await run.getAttribute('aria-describedby')}`)).toHaveText('Select the area first')
+        await run.click({ force: true })
+        await page.waitForTimeout(300)
+        await expectNoDetection(page)
+      }
+    })
+
+    test('the area cannot be edited while a detection runs', async ({ page }) => {
+      await openAnalyzer(page, '?engineDelay=2500')
+      await uploadFixture(page)
+      await setScale(page)
+      await drawArea(page)
+      await waitForAutoDetect(page)
+      await page.keyboard.press('3') // reopen the closed outline: Undo / Clear are live ...
+      await expect(page.getByTestId('area-clear')).toBeEnabled()
+      await expect(page.getByTestId('area-undo')).toBeEnabled()
+      await page.locator('canvas').first().focus()
+      await page.keyboard.press('Enter') // ... until a detection runs
+      await expect(page.locator('.canvas-area[aria-busy="true"]')).toBeVisible()
+      await expect(page.getByTestId('area-undo')).toBeDisabled()
+      await expect(page.getByTestId('area-clear')).toBeDisabled()
+      await expect(page.getByTestId('whole-photo')).toBeDisabled()
+      await expect(step(page, 'polygon')).toHaveAttribute('aria-disabled', 'true')
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-disabled', 'true')
+      await expect(step(page, 'threshold').locator('.spinner')).toBeVisible()
+      // the result that arrives belongs to the outline that was sent, and the outline is still there
+      await expect(page.locator('.canvas-area[aria-busy="false"]')).toBeVisible({ timeout: 30_000 })
+      await expect(step(page, 'threshold')).toHaveAttribute('aria-current', 'step')
+      await expect(page.getByTestId('stale-note')).toHaveCount(0)
+      await expect(saveRun(page)).toBeEnabled()
+      expect(await analyzeCount(page)).toBe(2)
     })
   })
 }
@@ -225,5 +420,88 @@ for (const width of [390, 320]) {
         }
       }
     })
+
+    test('the outdated peek (headline, Outdated tag, Show button) fits after the area is reopened', async ({ page }) => {
+      await openAnalyzer(page)
+      await uploadFixture(page)
+      await setScale(page)
+      await useWholePhoto(page)
+      await waitForAutoDetect(page)
+      await page.keyboard.press('3')
+      await clickImage(page, 150, 150)
+      await expect(page.getByTestId('stale-tag')).toBeVisible()
+      await page.waitForTimeout(300)
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0)
+      const toggle = await page.locator('[data-testid=results-toggle]:visible').first().boundingBox()
+      const headline = await page.locator('.sheet-headline').boundingBox()
+      expect(toggle.x + toggle.width, 'Show button inside the screen').toBeLessThanOrEqual(width)
+      expect(headline.x + headline.width, 'headline does not run under Show').toBeLessThanOrEqual(toggle.x + 1)
+    })
+
+    test('the stepper still fits while a detection runs (spinner in the Threshold step, every step disabled)', async ({ page }) => {
+      await openAnalyzer(page, '?engineDelay=4000')
+      await uploadFixture(page)
+      await setScale(page)
+      await drawArea(page)
+      await expect(page.locator('.canvas-area[aria-busy="true"]')).toBeVisible()
+      await expect(page.locator('.step[data-step=threshold] .spinner')).toBeVisible()
+      await page.waitForTimeout(300)
+      expect(await horizontalOverflow(page), 'page overflow while detecting').toBeLessThanOrEqual(0)
+      const boxes = await page.locator('.stepper .step').evaluateAll((els) => els.map((e) => {
+        const r = e.getBoundingClientRect()
+        const label = e.querySelector('.step-label').getBoundingClientRect()
+        const spinner = e.querySelector('.spinner')?.getBoundingClientRect()
+        return {
+          left: r.left, right: r.right, label: e.querySelector('.step-label').textContent,
+          clipped: e.scrollWidth > e.clientWidth + 1,
+          // nothing inside the button sticks out of it
+          innerRight: Math.max(label.right, spinner?.right ?? 0), disabled: e.getAttribute('aria-disabled'),
+        }
+      }))
+      expect(boxes.map((b) => b.label)).toEqual(['Photo', 'Scale', 'Area', 'Threshold', 'Clean up'])
+      for (const b of boxes) {
+        expect(b.left, `${b.label} left while detecting`).toBeGreaterThanOrEqual(0)
+        expect(b.right, `${b.label} right while detecting`).toBeLessThanOrEqual(width)
+        expect(b.clipped, `${b.label} clipped while detecting`).toBe(false)
+        expect(b.innerRight, `${b.label} content sticks out while detecting`).toBeLessThanOrEqual(b.right + 0.5)
+        expect(b.disabled).toBe('true')
+      }
+    })
   })
 }
+
+// ?engine=cloud: the same rule against the Python API: not a single POST /analyze before the area is chosen.
+test.describe('?engine=cloud waits for the area too', () => {
+  test.use({ viewport: { width: 1440, height: 900 } })
+
+  test('no POST /analyze until the outline is closed or Use whole photo is chosen', async ({ page }) => {
+    const api = await installOldApi(page)
+    const analyzePosts = []
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && new URL(r.url()).pathname.endsWith('/analyze')) analyzePosts.push(r.url())
+    })
+    await openAnalyzer(page, '?engine=cloud')
+    await uploadFixture(page)
+    await setScale(page)
+    await expect(step(page, 'polygon')).toHaveAttribute('aria-current', 'step')
+    await page.locator('canvas').first().focus()
+    await page.keyboard.press('Enter')
+    await page.keyboard.press('4')
+    await page.keyboard.press('5')
+    await clickTwoPoints(page) // an open outline is not an area either
+    await page.keyboard.press('Enter')
+    await page.getByTestId('settings-open').click()
+    await page.getByTestId('settings-open').click()
+    await page.waitForTimeout(1000) // longer than the cloud debounce (400 ms)
+    expect(analyzePosts).toEqual([])
+    expect(api.calls.map((c) => c.path)).not.toContain('/analyze')
+    expect(await engineStarts(page, 'analyze')).toBe(0)
+    await noResultsYet(page)
+
+    await useWholePhoto(page)
+    const body = await detect(page)
+    expect(body.nclusters).toBeGreaterThan(0)
+    expect(analyzePosts).toHaveLength(1)
+    expect(await engineStarts(page, 'analyze')).toBe(1)
+  })
+})

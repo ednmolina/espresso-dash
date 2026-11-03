@@ -165,6 +165,15 @@ export function engineLogLength(page) {
 }
 
 /**
+ * How many times the app STARTED an engine call for `op` ('analyze' | 'thresholdPreview' | 'erase' | ...), from the
+ * dev-only `window.__grindEngineStarts`. The engine log only records completions, so this is what proves that a
+ * detection was never even attempted. Local engine and ?engine=cloud alike (it counts the app's calls).
+ */
+export function engineStarts(page, op) {
+  return page.evaluate((o) => (window.__grindEngineStarts || {})[o] ?? 0, op)
+}
+
+/**
  * Waits for an entry for `op` ('upload' | 'analyze' | 'erase' | ...) at index >= fromIndex in the engine log
  * and returns it ({op, ok, ms, nclusters?, summary?, error?}). Entries with ok = false only match with
  * `{ ok: false }`; `{ ok: null }` matches either.
