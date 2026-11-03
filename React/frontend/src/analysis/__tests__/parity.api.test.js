@@ -6,6 +6,9 @@ import { createEngine } from '../engine.js'
 import { approx, caseNames, expectClose, expectSummary, fnvBytes, inflateBlue, layerInfo, loadCase } from './fixtureUtils.js'
 
 const STAT_RTOL = 1e-9
+// Tie flags are not recorded for API cases (the server dataset is not exposed), so assume ties: the
+// dv / median keys get a loose 1e-4 band instead of the exact stable-sort comparison used in parity.summary.
+const API_TIE = { dv: true, number: true, loose: 1e-4 }
 
 /** Replace "$image" / "$step:K" placeholders by the real ids. */
 function resolve(body, imageId, ids) {
@@ -81,8 +84,7 @@ function expectAnalyze(js, py, label) {
   }
   expectLayer(js.threshold_layer, py.threshold_layer, `${label} threshold_layer`)
   expectLayer(js.cluster_layer, py.cluster_layer, `${label} cluster_layer`)
-  // summary tie flags are not recorded for API cases; ties can only loosen the dv/median keys, so use 1e-6 on them
-  expectSummary(js.summary, py.summary, { dv: true, number: true }, label)
+  expectSummary(js.summary, py.summary, API_TIE, label)
 }
 
 describe('API replay matches the Python server', () => {
@@ -126,7 +128,7 @@ describe('API replay matches the Python server', () => {
           expect(js.removed_ids, `${label} removed_ids`).toEqual(py.removed_ids)
           expect(js.nclusters, `${label} nclusters`).toBe(py.nclusters)
           expectLayer(js.cluster_layer, py.cluster_layer, `${label} cluster_layer`)
-          expectSummary(js.summary, py.summary, { dv: true, number: true }, label)
+          expectSummary(js.summary, py.summary, API_TIE, label)
         } else if (step.op === 'histogram') {
           expectHistogram(js, py, label)
         } else {

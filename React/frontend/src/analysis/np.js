@@ -259,6 +259,85 @@ export function histogramUniform(values, weights, nBins, lo, hi) {
   return { hist, edges }
 }
 
+// ---- near-correctly-rounded log10 (double-double) -------------------------------------------
+// V8's Math.log10 differs from libm's (numpy) in ~27 % of inputs by 1 ulp, which moves the first and
+// last log-histogram edges (10**log10(x) vs x). glibc/numpy are correctly rounded in ~99.5 % of
+// cases, so a double-double evaluation matches numpy far more often.
+const SPLIT = 134217729 // 2^27 + 1
+
+function twoSum(a, b) {
+  const s = a + b
+  const bb = s - a
+  return [s, (a - (s - bb)) + (b - bb)]
+}
+
+function twoProd(a, b) {
+  const p = a * b
+  let t = SPLIT * a
+  const ah = t - (t - a)
+  const al = a - ah
+  t = SPLIT * b
+  const bh = t - (t - b)
+  const bl = b - bh
+  return [p, ((ah * bh - p) + ah * bl + al * bh) + al * bl]
+}
+
+function ddAdd(a, b) {
+  const [s, e] = twoSum(a[0], b[0])
+  const lo = e + a[1] + b[1]
+  const hi = s + lo
+  return [hi, lo - (hi - s)]
+}
+
+function ddMul(a, b) {
+  const [p, e] = twoProd(a[0], b[0])
+  const lo = e + (a[0] * b[1] + a[1] * b[0])
+  const hi = p + lo
+  return [hi, lo - (hi - p)]
+}
+
+function ddDiv(a, b) {
+  const q1 = a[0] / b[0]
+  const [p, pe] = twoProd(q1, b[0])
+  let r = ddAdd(a, [-p, -pe])
+  r = ddAdd(r, [-q1 * b[1], 0])
+  const q2 = r[0] / b[0]
+  const hi = q1 + q2
+  return [hi, q2 - (hi - q1)]
+}
+
+const LN2_DD = [0.6931471805599453, 2.3190468138462996e-17]
+const INV_LN10_DD = [0.4342944819032518, 1.098319650216765e-17]
+const f64 = new Float64Array(1)
+const u32 = new Uint32Array(f64.buffer)
+
+/** log10(x) accurate to well under 1 ulp (matches numpy's log10 in ~99.5 % of inputs). */
+export function log10Accurate(x) {
+  if (!(x > 0) || !Number.isFinite(x) || x < 2.2250738585072014e-308) return Math.log10(x)
+  // x = m * 2^e with m in [sqrt(1/2), sqrt(2))
+  f64[0] = x
+  let e = ((u32[1] >>> 20) & 0x7ff) - 1023
+  u32[1] = (u32[1] & 0x000fffff) | 0x3ff00000 // m in [1, 2)
+  let m = f64[0]
+  if (m > Math.SQRT2) { m /= 2; e += 1 }
+  const num = [m - 1, 0] // exact
+  const den = twoSum(m, 1)
+  const s = ddDiv(num, den)
+  const s2 = ddMul(s, s)
+  let term = s
+  let sum = s
+  for (let k = 1; k < 40; k++) {
+    term = ddMul(term, s2)
+    const t = ddDiv(term, [2 * k + 1, 0])
+    sum = ddAdd(sum, t)
+    if (Math.abs(t[0]) < 1e-36 * Math.abs(sum[0]) || t[0] === 0) break
+  }
+  const lnM = [2 * sum[0], 2 * sum[1]]
+  const lnX = ddAdd(lnM, ddMul(LN2_DD, [e, 0]))
+  const r = ddMul(lnX, INV_LN10_DD)
+  return r[0] + r[1]
+}
+
 const POW10 = [1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
   1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22]
 

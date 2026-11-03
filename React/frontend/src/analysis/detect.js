@@ -10,6 +10,7 @@ import {
 } from './kernels.js'
 import { makeDataset } from './dataset.js'
 import { roundHalfEven } from './np.js'
+import { pow2 } from './glibcPow.js'
 import { flattenBlue, halfContrastPercent } from './background.js'
 import { edgeWeights } from './stats.js'
 
@@ -245,10 +246,16 @@ export function detectParticles(blue, h, w, thresholdMask, bgMedian, settings, p
 
   const { ids, stats, offsets, pixRow, pixCol } = res
   const minRoundness = settings.min_roundness
+  // roundness / short / volume are recomputed here exactly as Python does: `x ** 2` on a
+  // Python float is libm pow(), which is not always x*x (see glibcPow.js).
   const keep = []
+  const roundnessAll = new Float64Array(ids.length)
   for (let i = 0; i < ids.length; i++) {
-    // roundness / short / volume were recomputed in detectCore with the same expressions
-    if (stats[i * 7 + 1] < minRoundness) continue
+    const surface = stats[i * 7]
+    const longAxis = stats[i * 7 + 3]
+    const roundness = surface === 1.0 ? 1.0 : surface / (Math.PI * pow2(longAxis))
+    roundnessAll[i] = roundness
+    if (roundness < minRoundness) continue
     keep.push(i)
   }
   const n = keep.length
@@ -270,12 +277,15 @@ export function detectParticles(blue, h, w, thresholdMask, bgMedian, settings, p
   for (let k = 0; k < n; k++) {
     const i = keep[k]
     const o = i * 7
+    const surface = stats[o]
+    const longAxis = stats[o + 3]
+    const shortAxis = surface / (Math.PI * longAxis)
     cols.cluster_id[k] = ids[i]
-    cols.surface[k] = stats[o]
-    cols.roundness[k] = stats[o + 1]
-    cols.short_axis[k] = stats[o + 2]
-    cols.long_axis[k] = stats[o + 3]
-    cols.volume[k] = stats[o + 4]
+    cols.surface[k] = surface
+    cols.roundness[k] = roundnessAll[i]
+    cols.short_axis[k] = shortAxis
+    cols.long_axis[k] = longAxis
+    cols.volume[k] = (Math.PI * pow2(shortAxis)) * longAxis
     cols.xmean[k] = stats[o + 5]
     cols.ymean[k] = stats[o + 6]
     cols.px_start[k] = offsets[i]
@@ -334,12 +344,12 @@ export function remeasureClusters(ds, axisMethod, volumeModel) {
     const shortAxis = surface / (Math.PI * longAxis)
     ds.short_axis[k] = shortAxis
     if (axisMethod === 'moments') {
-      ds.roundness[k] = surface === 1.0 ? 1.0 : surface / (Math.PI * (longAxis * longAxis))
+      ds.roundness[k] = surface === 1.0 ? 1.0 : surface / (Math.PI * pow2(longAxis))
     }
     if (volumeModel === 'spheroid') {
-      ds.volume[k] = (((4.0 / 3.0) * Math.PI) * longAxis) * (shortAxis * shortAxis)
+      ds.volume[k] = (((4.0 / 3.0) * Math.PI) * longAxis) * pow2(shortAxis)
     } else {
-      ds.volume[k] = (Math.PI * (shortAxis * shortAxis)) * longAxis
+      ds.volume[k] = (Math.PI * pow2(shortAxis)) * longAxis
     }
   }
 }

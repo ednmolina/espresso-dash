@@ -143,10 +143,18 @@ export function expectClusters(ds, cols, width, { edgeRtol = EDGE_WEIGHT_RTOL, l
 /** Summary keys whose value depends on the order numpy's unstable sort gives to equal diameters. */
 const TIE_KEYS = new Set(['dv10_mm', 'dv50_mm', 'dv90_mm', 'diameter_number_median_mm', 'span'])
 const VOLUME_MODE_RATIO = Math.pow(10, 1 / 40) * (1 + 1e-9)
+/** How far Python's unstable-sort value may sit from the stable-sort value (sanity bound only). */
+const TIE_SANITY_RTOL = 1e-3
 
 /**
  * Compares a JS summary against the Python one key by key (see P4 spec).
- * tie = fixture's tie_sensitive flags ({dv, number}); the tolerance for the tie-affected keys is 1e-6.
+ *
+ * `tie` = the fixture's tie_sensitive object: {dv, number, stable?}. numpy's default argsort is unstable, so
+ * when equal diameters carry unequal weights (edge correction) the percentile interpolation can differ
+ * from any other tie order by more than 1e-6. The exporter therefore also records those keys computed with a
+ * *stable* sort (what the JS port does): they must match at 1e-9, and Python's own value must lie within
+ * 0.1% of them. Without `stable` (API replays, where the server dataset is not exposed) the tie keys get
+ * `tie.loose` (default 1e-4).
  */
 export function expectSummary(js, py, tie = { dv: false, number: false }, label = '') {
   if (py === null) {
@@ -170,22 +178,34 @@ export function expectSummary(js, py, tie = { dv: false, number: false }, label 
       }
     } else if (typeof b === 'number') {
       expect(typeof a, where).toBe('number')
-      const rtol = tied && TIE_KEYS.has(key) ? 1e-6 : 1e-9
-      expect(approx(a, b, rtol, 1e-12), where).toBe(true)
+      if (tied && TIE_KEYS.has(key) && tie.stable) {
+        const st = tie.stable[key]
+        expect(approx(a, st, 1e-9, 1e-12), `${where} (stable-sort value ${st})`).toBe(true)
+        expect(approx(b, st, TIE_SANITY_RTOL, 1e-12), `${where} (python vs stable ${st})`).toBe(true)
+      } else if (tied && TIE_KEYS.has(key)) {
+        expect(approx(a, b, tie.loose ?? 1e-4, 1e-12), where).toBe(true)
+      } else {
+        expect(approx(a, b, 1e-9, 1e-12), where).toBe(true)
+      }
     } else {
       expect(a, where).toEqual(b)
     }
   }
 }
 
-/** dv_ci95: within half the Python interval width (+0.1% of dv) and containing the point estimate. */
+/**
+ * dv_ci95: within half the Python interval width (+0.1% of dv) and containing the point estimate.
+ * numpy's Generator cannot be reproduced in JS, so the two bootstrap intervals are independent draws of the
+ * same estimator. With fewer than 30 particles the 2.5/97.5 percentile of 200 resamples is itself very noisy
+ * (e.g. 15 particles: Dv90 lower bound 1.43 vs 1.31), so the allowance there is the full Python width.
+ */
 function expectCi(js, py, label) {
   expect(Object.keys(js.dv_ci95).sort(), `${label} dv_ci95 keys`).toEqual(Object.keys(py.dv_ci95).sort())
   for (const q of ['dv10', 'dv50', 'dv90']) {
     const [pLo, pHi] = py.dv_ci95[q]
     const [jLo, jHi] = js.dv_ci95[q]
     const dv = js[`${q}_mm`]
-    const tol = 0.5 * (pHi - pLo) + 1e-3 * dv
+    const tol = (js.cluster_count < 30 ? 1.0 : 0.5) * (pHi - pLo) + 1e-3 * dv
     const where = `${label} dv_ci95.${q}: js=[${jLo}, ${jHi}] py=[${pLo}, ${pHi}] dv=${dv}`
     expect(Math.abs(jLo - pLo) <= tol, where).toBe(true)
     expect(Math.abs(jHi - pHi) <= tol, where).toBe(true)

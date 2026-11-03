@@ -160,7 +160,21 @@ def _ties(values: np.ndarray, weights: np.ndarray) -> bool:
     return bool(np.any((counts > 1) & (hi != lo)))
 
 
+def _stable_percentiles(values, weights, percentiles):
+    """coffeegrindsize_core.stats.weighted_percentiles with a *stable* sort (what the JS port does)."""
+    order = np.argsort(values, kind="stable")
+    sv = values[order]
+    cum = np.cumsum(weights[order])
+    pos = (cum - 0.5 * weights[order]) / cum[-1] * 100.0
+    return [float(np.interp(p, pos, sv)) for p in percentiles]
+
+
 def tie_flags(ds) -> dict:
+    """Which summary keys depend on numpy's unstable argsort order of equal diameters.
+
+    ``stable`` (only when a flag is set) holds those keys recomputed with a stable sort, which is the
+    order the JS port uses; the JS test checks them tightly and the Python values loosely.
+    """
     from coffeegrindsize_core import filter_by_min_diameter
     flags = {"dv": False, "number": False}
     if ds.nclusters == 0 or ds.pixel_scale is None:
@@ -171,8 +185,16 @@ def tie_flags(ds) -> dict:
         return flags
     d = 2.0 * np.sqrt(fds.long_axes * fds.short_axes) / scale
     ew = fds.edge_weights
-    flags["dv"] = _ties(d, (np.pi / 6.0) * d ** 3 * ew)
+    vw = (np.pi / 6.0) * d ** 3 * ew
+    flags["dv"] = _ties(d, vw)
     flags["number"] = _ties(d, ew)
+    if flags["dv"] or flags["number"]:
+        dv10, dv50, dv90 = _stable_percentiles(d, vw, (10.0, 50.0, 90.0))
+        flags["stable"] = {
+            "dv10_mm": dv10, "dv50_mm": dv50, "dv90_mm": dv90,
+            "span": (dv90 - dv10) / dv50 if dv50 > 0 else None,
+            "diameter_number_median_mm": _stable_percentiles(d, ew, (50.0,))[0],
+        }
     return flags
 
 

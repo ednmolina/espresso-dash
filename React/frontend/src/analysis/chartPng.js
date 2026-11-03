@@ -202,8 +202,8 @@ export function renderChartPng(data) {
     const color = COLORS[k % COLORS.length]
     const name = e?.label ? `${e.label}: ` : ''
     const parts = []
-    if (isNum(e?.mean)) parts.push(`mean ${fmtTick(e.mean * scale)} ${unitText}`.trim())
-    if (isNum(e?.median)) parts.push(`median ${fmtTick(e.median * scale)} ${unitText}`.trim())
+    if (isNum(e?.mean)) parts.push(`mean ${+(e.mean * scale).toPrecision(3)} ${unitText}`.trim())
+    if (isNum(e?.median)) parts.push(`median ${+(e.median * scale).toPrecision(3)} ${unitText}`.trim())
     const text = `${name}${parts.join(', ')}`
     if (!text) return
     ctx.fillStyle = color
