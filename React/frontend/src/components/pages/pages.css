@@ -420,6 +420,7 @@ label.el-btn-tinted:hover { background: var(--el-separator); }
   .el-grinder .el-legend-mark { width: 12px; }
   .el-grinder .el-card-head { margin-bottom: 0; }
   .el-grinder .el-card-head .muted { font-size: 12px; }
+  .el-page.el-forecast { gap: 8px; padding-bottom: 10px; } /* one-screen budget: CI fonts render ~14px taller */
   .el-forecast .el-hero { padding: 16px 18px; gap: 10px; }
   .el-forecast .el-hero-number { font-size: 56px; margin: 2px 0 4px; }
   .el-forecast .el-hero-number small { font-size: 22px; }
