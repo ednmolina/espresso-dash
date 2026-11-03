@@ -32,7 +32,7 @@ export function photoChecksModel(latest) {
       change,
     }
   }
-  return { shape, split, table, minPx: latest.shape_summary?.min_px ?? 20 }
+  return { shape, split, table, erased: latest.erased === true, minPx: latest.shape_summary?.min_px ?? 20 }
 }
 
 

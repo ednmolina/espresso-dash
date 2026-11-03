@@ -4,7 +4,7 @@
 import { test, expect } from '@playwright/test'
 import {
   openAnalyzer, openHarness, gotoWorkspace, uploadFixture, setScale, detect, showAllPoints, trackErrors,
-  horizontalOverflow, TOUCHING_FIXTURE,
+  horizontalOverflow, TOUCHING_FIXTURE, clickImage, engineLogLength, waitForEngineOp,
 } from './helpers.js'
 import { installOldApi } from './stubs/oldApi.js'
 
@@ -214,6 +214,58 @@ test.describe('Photo analysis checks are in memory only', () => {
     await page.reload()
     await gotoWorkspace(page, 'diagnostics')
     await expect(page.locator('[data-testid=diag-checks-empty]')).toBeVisible()
+  })
+})
+
+test.describe('Photo analysis checks follow the current photo and clean-up', () => {
+  test.use({ viewport: { width: 1440, height: 900 } })
+
+  test('a new upload empties the Diagnostics checks until the new photo is analyzed', async ({ page }) => {
+    const errors = trackErrors(page)
+    await openAnalyzer(page, '?nocalib=1')
+    await analyzeTouching(page)
+    await gotoWorkspace(page, 'diagnostics')
+    await expect(page.locator('[data-testid=diag-shape-range]')).toBeVisible()
+
+    await gotoWorkspace(page, 'analyzer')
+    await uploadFixture(page, TOUCHING_FIXTURE)
+    await expect(page.locator('[data-testid=results-card-empty]')).toBeVisible()
+    await gotoWorkspace(page, 'diagnostics')
+    await expect(page.locator('[data-testid=diag-checks-empty]')).toBeVisible()
+    await expect(page.locator('[data-testid=diag-shape-range]')).toHaveCount(0)
+    expect(errors).toEqual([])
+  })
+
+  test('after an erase the unseparated Dv90 is labelled "at detection, before clean-up"', async ({ page }) => {
+    const errors = trackErrors(page)
+    await openAnalyzer(page, '?nocalib=1')
+    await uploadFixture(page, TOUCHING_FIXTURE)
+    await openSettings(page)
+    await page.locator('[data-testid=split-toggle]').check()
+    await closeSettings(page, false)
+    await setScale(page)
+    await detect(page)
+
+    const note = page.locator('[data-testid=split-note]')
+    await page.locator('details.card-details summary').click()
+    const metric = page.locator('.metric', { hasText: 'Dv90 unseparated' })
+    await expect(note).toContainText(/Dv90 before separating: [\d,]+ µm\./)
+    await expect(metric).toContainText('at detection')
+    await expect(metric).not.toContainText('before clean-up')
+
+    // erase the disc at the centre of the first grid cell
+    await page.keyboard.press('4')
+    await clickImage(page, 110, 150)
+    const from = await engineLogLength(page)
+    await page.keyboard.press('Enter')
+    await waitForEngineOp(page, 'erase', from)
+
+    await expect(note).toContainText(/Dv90 before separating \(at detection, before clean-up\): [\d,]+ µm\./)
+    await expect(metric).toContainText('at detection, before clean-up')
+
+    await gotoWorkspace(page, 'diagnostics')
+    await expect(page.locator('[data-testid=diag-photo-checks]')).toContainText('Figures are from detection, before clean-up.')
+    expect(errors).toEqual([])
   })
 })
 

@@ -155,7 +155,7 @@ function ChecksSplit({ model, phone, onOpenAnalyzer }) {
           </tbody>
         </table>
       )}
-      <p className="el-pcheck-foot muted">Separation lowers Dv90 when clumps are counted as one large particle. Points saved to the grinder curve while it is on are marked.</p>
+      <p className="el-pcheck-foot muted">Separation lowers Dv90 when clumps are counted as one large particle. Points saved to the grinder curve while it is on are marked.{model.erased ? ' Figures are from detection, before clean-up.' : ''}</p>
     </div>
   )
 }

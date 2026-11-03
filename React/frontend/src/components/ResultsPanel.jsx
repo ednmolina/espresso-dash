@@ -50,7 +50,7 @@ function ShapeLine({ shape, phone }) {
 }
 
 /** Shown only when "Separate touching particles" was on for this analysis. */
-function SplitNote({ split, phone }) {
+export function SplitNote({ split, phone, erased = false }) {
   let text
   if (split.clustersSplit > 0) {
     const before = split.before?.dv90 != null ? split.before.dv90 : null
@@ -58,11 +58,11 @@ function SplitNote({ split, phone }) {
       text = (
         <>
           Separated {split.clustersSplit.toLocaleString()} clumps → {split.pieces.toLocaleString()} particles
-          {before != null && <> · <span className="nowrap">Dv90 before {um(before)} µm</span></>}
+          {before != null && <> · <span className="nowrap">Dv90 before {um(before)} µm{erased ? ' at detection' : ''}</span></>}
         </>
       )
     } else {
-      text = `Separated ${split.clustersSplit.toLocaleString()} touching clumps into ${split.pieces.toLocaleString()} particles.${before != null ? ` Dv90 before separating: ${um(before)} µm.` : ''}`
+      text = `Separated ${split.clustersSplit.toLocaleString()} touching clumps into ${split.pieces.toLocaleString()} particles.${before != null ? ` Dv90 before separating${erased ? ' (at detection, before clean-up)' : ''}: ${um(before)} µm.` : ''}`
     }
   } else {
     text = 'Separate touching particles is on; no touching clumps were found.'
@@ -121,7 +121,7 @@ export function headlineOf(rawSummary) {
 
 /** The body of the glass results card (and of the phone sheet). */
 export default function ResultsPanel({
-  result, histogram, histogramLoading, weight = 'mass', expanded = false, onToggleExpand, phone = false,
+  result, histogram, histogramLoading, weight = 'mass', expanded = false, onToggleExpand, phone = false, erased = false,
 }) {
   if (!result) return null
   const { nclusters, summary: rawSummary } = result
@@ -153,7 +153,7 @@ export default function ResultsPanel({
   const shapeNotes = (shape || split) ? (
     <>
       {shape && <ShapeLine shape={shape} phone={phone} />}
-      {split && <SplitNote split={split} phone={phone} />}
+      {split && <SplitNote split={split} phone={phone} erased={erased} />}
     </>
   ) : null
 
@@ -270,7 +270,7 @@ export default function ResultsPanel({
             />
           )}
           {split && split.before?.dv90 != null && (
-            <Metric label="Dv90 unseparated" value={`${um(split.before.dv90)} µm`} hint="at detection" />
+            <Metric label="Dv90 unseparated" value={`${um(split.before.dv90)} µm`} hint={erased ? 'at detection, before clean-up' : 'at detection'} />
           )}
           <Metric label="Surface quality" value={fixed(raw.surface_quality, 2)} hint="Uncalibrated model" title={`${UNCAL}. Mean / std of surface; higher = more uniform.`} />
           <Metric label="Est. extraction" value={isNum(raw.average_extraction_yield_pct) ? `${raw.average_extraction_yield_pct.toFixed(1)}%` : null} hint="Uncalibrated model" title={UNCAL} />

@@ -11,8 +11,11 @@ import {
 } from '../calibrationStore'
 import { buildCalibrationPoints } from '../grindCalibration'
 import {
-  _resetForTests as resetLatest, clearLatestAnalysis, getLatestAnalysis, setLatestAnalysis, subscribeLatestAnalysis,
+  _resetForTests as resetLatest, clearLatestAnalysis, getLatestAnalysis, markLatestAnalysisErased, setLatestAnalysis, subscribeLatestAnalysis,
 } from '../analysisSession'
+import React, { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { SplitNote } from '../components/ResultsPanel'
 import { checksSubtitle, formatChange, photoChecksModel } from '../photoChecks'
 
 describe('settings defaults', () => {
@@ -202,7 +205,7 @@ describe('analysisSession (in memory only)', () => {
     const fn = vi.fn()
     const off = subscribeLatestAnalysis(fn)
     setLatestAnalysis({ summary: { dv50_mm: 0.4 }, shape_summary: { aspect_ratio_median: 1.3 }, split_info: null, at: 5 })
-    expect(getLatestAnalysis()).toEqual({ summary: { dv50_mm: 0.4 }, shape_summary: { aspect_ratio_median: 1.3 }, split_info: null, at: 5 })
+    expect(getLatestAnalysis()).toEqual({ summary: { dv50_mm: 0.4 }, shape_summary: { aspect_ratio_median: 1.3 }, split_info: null, at: 5, erased: false })
     expect(fn).toHaveBeenCalledTimes(1)
     setLatestAnalysis({ summary: null })
     expect(getLatestAnalysis().summary).toBeNull()
@@ -210,6 +213,22 @@ describe('analysisSession (in memory only)', () => {
     clearLatestAnalysis()
     expect(getLatestAnalysis()).toBeNull()
     expect(fn).toHaveBeenCalledTimes(2)
+  })
+
+  it('an erase marks the stored analysis as erased; a new analysis or a clear resets it', () => {
+    markLatestAnalysisErased() // nothing stored yet: no-op
+    expect(getLatestAnalysis()).toBeNull()
+    setLatestAnalysis({ summary: { dv50_mm: 0.4 } })
+    expect(getLatestAnalysis().erased).toBe(false)
+    markLatestAnalysisErased()
+    expect(getLatestAnalysis()).toMatchObject({ summary: { dv50_mm: 0.4 }, erased: true })
+    expect(photoChecksModel(getLatestAnalysis()).erased).toBe(true)
+    setLatestAnalysis({ summary: { dv50_mm: 0.5 } })
+    expect(getLatestAnalysis().erased).toBe(false)
+    // a new upload clears the latest analysis, so Diagnostics stops describing the previous photo
+    clearLatestAnalysis()
+    expect(getLatestAnalysis()).toBeNull()
+    expect(photoChecksModel(getLatestAnalysis())).toBeNull()
   })
 
   it('writes nothing to localStorage', () => {
@@ -266,5 +285,23 @@ describe('photoChecksModel (Diagnostics "Photo analysis checks")', () => {
     expect(formatChange(-3.84)).toBe('−3.8%')
     expect(formatChange(2.26)).toBe('+2.3%')
     expect(formatChange(0)).toBe('0.0%')
+  })
+})
+
+// vitest here transforms .jsx with the classic runtime, which looks up a global React
+globalThis.React = React
+
+describe('SplitNote after an erase', () => {
+  const split = normalizeSplit({ clusters_split: 71, pieces_added: 77, unsplit: { cluster_count: 3991, dv90_mm: 0.823 } })
+  const render = (props) => renderToStaticMarkup(createElement(SplitNote, { split, ...props }))
+
+  it('keeps the plain wording until something is erased', () => {
+    expect(render({})).toContain('Dv90 before separating: 823 µm.')
+    expect(render({ phone: true })).toContain('Dv90 before 823 µm</span>')
+  })
+
+  it('labels the unseparated Dv90 as the value at detection once particles were erased', () => {
+    expect(render({ erased: true })).toContain('Dv90 before separating (at detection, before clean-up): 823 µm.')
+    expect(render({ erased: true, phone: true })).toContain('Dv90 before 823 µm at detection')
   })
 })

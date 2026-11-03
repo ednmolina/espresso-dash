@@ -24,7 +24,14 @@ function notify() {
  * no layers): `{ summary, shape_summary, split_info, at }`.
  */
 export function setLatestAnalysis({ summary = null, shape_summary = null, split_info = null, at = Date.now() } = {}) {
-  latest = { summary, shape_summary, split_info, at }
+  latest = { summary, shape_summary, split_info, at, erased: false }
+  notify()
+}
+
+/** Note that particles were erased after detection; the stored figures stay the ones at detection. */
+export function markLatestAnalysisErased() {
+  if (latest === null || latest.erased) return
+  latest = { ...latest, erased: true }
   notify()
 }
 

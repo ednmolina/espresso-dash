@@ -15,7 +15,7 @@ import { histogramKind, layerOf, mergeErase, normalizeSummary, previewSrc, saved
 import { useShots } from '../shotsStore'
 import { useGrindCalibration } from '../useModels'
 import { addRun, runFromSummary } from '../calibrationStore'
-import { setLatestAnalysis } from '../analysisSession'
+import { clearLatestAnalysis, markLatestAnalysisErased, setLatestAnalysis } from '../analysisSession'
 import { parseSetting } from '../grindCalibration'
 import { useNav } from '../navigation'
 import '../analyzer.css'
@@ -379,6 +379,7 @@ export default function AnalyzerApp({ user }) {
       setPolygonPoints([])
       setErasePoints([])
       setAnalysisResult(null)
+      clearLatestAnalysis()
       setRemovedIds([])
       setHistogram(null)
       setHistogramLoading(false)
@@ -538,6 +539,7 @@ export default function AnalyzerApp({ user }) {
       setErasePoints([])
       setHistogram(null)
       const added = gone.length - removedIds.length
+      if (gone.length > 0) markLatestAnalysisErased()
       say(added > 0 ? `${added} cluster${added === 1 ? '' : 's'} removed (${gone.length} in total).` : 'No clusters under the brush.', added > 0 ? 'success' : 'info')
       if ((data.summary ?? analysisResult?.summary)) loadHistogram(gone, histWeight)
     } catch (err) {
@@ -1012,6 +1014,7 @@ export default function AnalyzerApp({ user }) {
       weight={histWeight}
       expanded={histExpanded}
       phone={isPhone}
+      erased={removedIds.length > 0}
       onToggleExpand={() => {
         if (isPhone && !histExpanded) setSheetDetent('full')
         setHistExpanded((v) => !v)
