@@ -3,16 +3,19 @@ import { RATING_COLORS } from '../../dashboardData'
 
 export const PanelActionsContext = createContext(null)
 
-export function Panel({ title, subtitle, children, testId }) {
+export function Panel({ title, subtitle, children, testId, actions = null, className = '' }) {
   const [actionsEl, setActionsEl] = useState(null)
   return (
-    <section className="dashboard-panel" data-testid={testId}>
+    <section className={`dashboard-panel ${className}`.trim()} data-testid={testId}>
       <div className="dashboard-panel-header">
         <div className="dashboard-panel-heading">
           <h2>{title}</h2>
           {subtitle && <p>{subtitle}</p>}
         </div>
-        <div className="dashboard-panel-actions" ref={setActionsEl} />
+        <div className="dashboard-panel-tools">
+          {actions}
+          <div className="dashboard-panel-actions" ref={setActionsEl} />
+        </div>
       </div>
       <PanelActionsContext.Provider value={actionsEl}>
         <div className="dashboard-panel-body">{children}</div>
@@ -21,16 +24,22 @@ export function Panel({ title, subtitle, children, testId }) {
   )
 }
 
-export function MetricCard({ label, value, sub, subTone, testId }) {
+/** `unit` is a muted suffix ("%", "µm", " of 42"); `bar` (0-100) draws a thin progress bar instead of `sub`. */
+export function MetricCard({ label, value, unit, sub, subTone, bar, testId }) {
   return (
     <div className="dashboard-metric-card" data-testid={testId}>
       <span className="dashboard-metric-label">{label}</span>
-      <strong className="dashboard-metric-value">{value}</strong>
-      {sub !== undefined && sub !== null && (
-        <span className="dashboard-metric-sub">
-          {subTone && <i className={`dashboard-dot tone-${subTone}`} aria-hidden="true" />}
-          {sub}
-        </span>
+      <strong className="dashboard-metric-value">
+        {value}
+        {unit ? <span className="dashboard-metric-unit">{unit}</span> : null}
+      </strong>
+      {Number.isFinite(bar) ? (
+        <div className="dashboard-metric-bar" role="img" aria-label={`${Math.round(bar)} percent`}>
+          <span style={{ width: `${Math.max(0, Math.min(100, bar))}%` }} />
+        </div>
+      ) : null}
+      {!Number.isFinite(bar) && sub !== undefined && sub !== null && (
+        <span className={`dashboard-metric-sub ${subTone ? `tone-${subTone}` : ''}`.trim()}>{sub}</span>
       )}
     </div>
   )
@@ -133,7 +142,7 @@ function renderCell(value, column) {
   return value
 }
 
-export function DataTable({ rows, editable = false, onUpdateCell = null, totalCount = null, testId }) {
+export function DataTable({ rows, editable = false, onUpdateCell = null, totalCount = null, testId, readOnlyColumns = [] }) {
   const [editingCell, setEditingCell] = useState(null)
   const [draftValue, setDraftValue] = useState('')
   const [pendingCell, setPendingCell] = useState(null)
@@ -150,8 +159,9 @@ export function DataTable({ rows, editable = false, onUpdateCell = null, totalCo
   const columns = Object.keys(rows[0]).filter((column) => column !== '__row_id')
   const numericColumns = new Set(columns.filter((column) => rows.every((row) => row[column] === null || row[column] === undefined || typeof row[column] === 'number')))
 
+  const readOnly = new Set(readOnlyColumns)
   const beginEdit = (rowId, column, value) => {
-    if (!editable || !onUpdateCell || pendingCell) return
+    if (!editable || !onUpdateCell || pendingCell || readOnly.has(column)) return
     setEditingCell({ rowId, column })
     setDraftValue(value === null || value === undefined ? '' : String(value))
   }
@@ -197,7 +207,8 @@ export function DataTable({ rows, editable = false, onUpdateCell = null, totalCo
                       numericColumns.has(column) ? 'num' : '',
                       ci === 0 ? 'sticky-col' : '',
                       column === 'Notes' ? 'notes' : '',
-                      editable ? 'dashboard-table-cell-editable' : '',
+                      editable && !readOnly.has(column) ? 'dashboard-table-cell-editable' : '',
+                      readOnly.has(column) ? 'dashboard-table-cell-readonly' : '',
                     ].filter(Boolean).join(' ')
                     const text = renderCell(row[column], column)
                     return (

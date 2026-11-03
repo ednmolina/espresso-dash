@@ -330,11 +330,11 @@ function rollingMean(values, windowSize) {
   })
 }
 
-function LineChartInner({ data, xKey, yKey, xLabel, yLabel, tickKey, tickFormat, tooltip, rolling = false, band, bandLabel, testId }) {
+function LineChartInner({ data, xKey, yKey, xLabel, yLabel, tickKey, tickFormat, tooltip, rolling = false, band, bandLabel, testId, height: fixedHeight }) {
   const [hovered, setHovered] = useState(null)
   const shellRef = useRef(null)
   const width = useElementWidth(shellRef)
-  const height = chartHeight(width)
+  const height = fixedHeight ?? chartHeight(width)
   const plotWidth = width - MARGIN.left - MARGIN.right
   const plotHeight = height - MARGIN.top - MARGIN.bottom
 
@@ -376,7 +376,7 @@ function LineChartInner({ data, xKey, yKey, xLabel, yLabel, tickKey, tickFormat,
       {rolling && (
         <StaticLegend items={[
           { label: 'Shot', color: 'var(--faint)', height: 1.5, faint: true },
-          { label: '7-shot average', color: 'var(--accent)', height: 2.5 },
+          { label: '7-shot average', color: 'var(--el-shotlog)', height: 2.5 },
         ]}
         />
       )}
