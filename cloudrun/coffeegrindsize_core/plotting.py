@@ -93,5 +93,12 @@ def _build_bins(xmin: float, xmax: float, x_log: bool, bins: int | None) -> np.n
             bins = max(int(np.ceil((xmax - xmin) / DEFAULT_LINEAR_BIN_SIZE)), 10)
 
     if x_log:
-        return np.logspace(np.log10(xmin), np.log10(xmax), bins)
-    return np.linspace(xmin, xmax, bins)
+        edges = np.logspace(np.log10(xmin), np.log10(xmax), bins)
+    else:
+        edges = np.linspace(xmin, xmax, bins)
+    # 10**log10(x) can round slightly away from x (libm dependent), which would leave the
+    # smallest/largest value outside every bin. Pin the end edges to the exact range.
+    if len(edges) > 1:
+        edges[0] = xmin
+        edges[-1] = xmax
+    return edges

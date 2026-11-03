@@ -8,6 +8,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 
 const BASE = process.env.PROTECTED_BASE || '3b5a924'
 const MAIN = 'e299811'
@@ -210,7 +211,23 @@ const srcFiles = walk(path.join(ROOT, FE, 'src')).map((p) => path.relative(ROOT,
 /* ---------- 6. backend untouched ---------- */
 {
   const paths = ['cloudrun', 'tests', 'pytest.ini', 'requirements-dev.txt']
-  const diffNames = gitR(['diff', '--name-status', BASE, '--', ...paths]).trim()
+  // Owner-approved exception (histogram edge rounding fix): _build_bins now pins the first/last bin
+  // edge to xmin/xmax, because 10**log10(x) can round just outside x (CPU/libm dependent) and drop
+  // the extreme particle from every bin. This ONE file is exempt from the diff check, but only
+  // while its content equals the pinned hash; any other edit to it fails. Every other backend path
+  // stays guarded exactly as before. (Line endings are normalised to LF before hashing.)
+  const FIXED_BACKEND_FILE = 'cloudrun/coffeegrindsize_core/plotting.py'
+  const FIXED_BACKEND_SHA256 = 'ecce99701db3a93dafb0284b36840489b40f7f4ae4718e4c7acfff4edc6c2362'
+  const fixedText = readWork(FIXED_BACKEND_FILE)
+  const fixedSha = fixedText === null ? null : createHash('sha256').update(fixedText.replace(/\r\n/g, '\n')).digest('hex')
+  const diffSpec = [...paths]
+  if (fixedSha === FIXED_BACKEND_SHA256) {
+    diffSpec.push(`:(exclude)${FIXED_BACKEND_FILE}`)
+  } else if (gitR(['diff', '--name-only', BASE, '--', FIXED_BACKEND_FILE]).trim()) {
+    fail(6, `${FIXED_BACKEND_FILE} differs from ${BASE} but does not match the owner-approved version `
+      + `(expected sha256 ${FIXED_BACKEND_SHA256}, got ${fixedSha}); only the approved histogram edge fix is allowed`)
+  }
+  const diffNames = gitR(['diff', '--name-status', BASE, '--', ...diffSpec]).trim()
   if (diffNames) fail(6, `backend files differ from ${BASE}:\n      ${diffNames.split('\n').join('\n      ')}`)
   const untracked = gitR(['ls-files', '--others', '--exclude-standard', '--', ...paths]).trim()
   if (untracked) fail(6, `untracked files in the backend:\n      ${untracked.split('\n').join('\n      ')}`)
