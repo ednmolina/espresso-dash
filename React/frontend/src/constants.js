@@ -63,6 +63,8 @@ export function analysisSettingsPayload(settings, { isLocal = true } = {}) {
   if (settings.split_touching) stripped.push('Separate touching particles')
   delete body.split_touching
   delete body.split_neck_ratio
+  // the on-device flatten seed for a manual threshold; the old server has no such field
+  delete body.flatten_threshold_percent
   if (body.volume_model === 'ellipsoid') {
     body.volume_model = 'legacy'
     stripped.push('Ellipsoid volume')

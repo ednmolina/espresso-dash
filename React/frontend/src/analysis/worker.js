@@ -1,7 +1,7 @@
 // Web Worker host for the on-device analysis engine.
 //
 // Protocol (structured clone):
-//   in : { id, op: 'upload' | 'registerBlue' | 'analyze' | 'erase' | 'histogram' | 'compare' | 'preview', payload }
+//   in : { id, op: 'upload' | 'registerBlue' | 'analyze' | 'thresholdPreview' | 'dropPreviewCache' | 'erase' | 'histogram' | 'compare' | 'preview', payload }
 //   out: { id, type: 'progress', phase, fraction }
 //        { id, type: 'result', ok: true, result }  |  { id, type: 'result', ok: false, error: { message, status } }
 //
@@ -83,6 +83,14 @@ async function handle(op, payload, id) {
       await materializeLayers(result, transfer)
       break
     }
+    case 'thresholdPreview':
+      result = engine.thresholdPreview(payload)
+      if (!result.stale) await materializeLayers(result, transfer)
+      break
+    case 'dropPreviewCache':
+      engine.dropPreviewCache()
+      result = { ok: true }
+      break
     case 'erase':
       result = engine.erase(payload)
       await materializeLayers(result, transfer)

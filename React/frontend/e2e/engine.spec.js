@@ -13,7 +13,8 @@ const VIEWPORTS = [
 ]
 
 // Recorded from the Python core on fixtures/grind.png with the UI defaults (poly4 background, half-contrast
-// threshold, edge correction) and the scale set by setScale() (200 px = US quarter, 24.26 mm). The legacy
+// threshold, edge correction) and the scale set by setScale(page, { preset: 'US Quarter' }) (200 px = US quarter,
+// 24.26 mm; the app's own default reference is Custom 20 mm). The legacy
 // settings give the same count (24). To regenerate:
 //   cd cloudrun && python - <<'PY'
 //   import math; from PIL import Image
@@ -63,8 +64,7 @@ for (const vp of VIEWPORTS) {
     test('progress is shown and Cancel stops detection; detecting again works', async ({ page }) => {
       await openAnalyzer(page, '?engineDelay=3000')
       await uploadFixture(page)
-      await setScale(page)
-      await page.keyboard.press('Enter')
+      await setScale(page) // the second tap moves to Threshold, which starts detecting at once
 
       await expect(page.locator('.canvas-area[aria-busy="true"]')).toBeVisible()
       await expect(page.locator('.busy-progress')).toBeVisible()
@@ -89,7 +89,7 @@ for (const vp of VIEWPORTS) {
     test('the particle count and Dv50 match the Python core', async ({ page }) => {
       await openAnalyzer(page)
       await uploadFixture(page)
-      await setScale(page)
+      await setScale(page, { preset: 'US Quarter' })
       const entry = await detect(page)
       expect(entry.nclusters).toBe(PYTHON_NCLUSTERS)
       await expect.poll(() => particleCount(page)).toBe(PYTHON_NCLUSTERS)

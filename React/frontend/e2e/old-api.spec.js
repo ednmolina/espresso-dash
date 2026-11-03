@@ -40,12 +40,13 @@ test.describe('analyzer against the old backend', () => {
     await expect(group).toBeVisible()
     const clusters = group.getByRole('radio', { name: /cluster/i })
     const threshold = group.getByRole('radio', { name: /threshold/i })
-    await expect(clusters).toHaveAttribute('aria-checked', 'true')
-    await threshold.click()
+    // detecting lands on the Threshold step, which shows the threshold overlay
     await expect(threshold).toHaveAttribute('aria-checked', 'true')
-    await expect(clusters).toHaveAttribute('aria-checked', 'false')
     await clusters.click()
     await expect(clusters).toHaveAttribute('aria-checked', 'true')
+    await expect(threshold).toHaveAttribute('aria-checked', 'false')
+    await threshold.click()
+    await expect(threshold).toHaveAttribute('aria-checked', 'true')
   })
 
   test('erase reduces the particle count', async ({ page }) => {

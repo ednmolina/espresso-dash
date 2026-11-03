@@ -82,6 +82,20 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
     onSettingsChange({ ...settings, [key]: val })
   }
   const setStr = (key) => (e) => onSettingsChange({ ...settings, [key]: e.target.value })
+  // In Manual the chosen percent is threshold_percent and the Auto seed is kept as flatten_threshold_percent.
+  const seed = settings.flatten_threshold_percent ?? settings.threshold_percent
+  const setSeed = (e) => {
+    const val = parseFloat(e.target.value)
+    onSettingsChange(settings.flatten_threshold_percent != null
+      ? { ...settings, flatten_threshold_percent: val }
+      : { ...settings, threshold_percent: val })
+  }
+  const setThresholdMode = (e) => {
+    const mode = e.target.value
+    if (mode === 'half_contrast' && settings.flatten_threshold_percent != null) {
+      onSettingsChange({ ...settings, threshold_mode: mode, threshold_percent: settings.flatten_threshold_percent, flatten_threshold_percent: null })
+    } else onSettingsChange({ ...settings, threshold_mode: mode })
+  }
   const isLegacy = MEASUREMENT_KEYS.every((k) => settings[k] === LEGACY_SETTINGS[k])
   const toggleLegacy = (e) => {
     const patch = {}
@@ -101,18 +115,6 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
         </div>
       )}
       <h3>Detection</h3>
-
-      <label>
-        <span className="label-row">
-          <span>Threshold (%)</span>
-          <HelpTip
-            label="Threshold"
-            text="Higher values detect fewer, darker pixels. Lower values include more of the image and can merge nearby grounds."
-          />
-        </span>
-        <input type="range" style={fillStyle(settings.threshold_percent, 1, 100)} min={1} max={100} step={0.1} value={settings.threshold_percent} onChange={set('threshold_percent')} />
-        <output className="range-value">{settings.threshold_percent.toFixed(1)}</output>
-      </label>
 
       <label>
         <span className="label-row">
@@ -220,7 +222,7 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
 
 
       <details className="advanced">
-        <summary>Advanced / measurement model</summary>
+        <summary>Advanced</summary>
         <div className="advanced-body">
           <label className="checkbox legacy-toggle">
             <input type="checkbox" checked={isLegacy} onChange={toggleLegacy} />
@@ -246,12 +248,24 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
 
           <label>
             <span className="label-row">
-              <span>Threshold mode</span>
-              <HelpTip label="Threshold mode" text="'Half contrast' puts the edge midway between paper and particle brightness, which sizes pale or blurry grounds more accurately. 'Fixed' uses the Threshold (%) slider as is." />
+              <span>Auto threshold seed (%)</span>
+              <HelpTip
+                label="Auto threshold seed"
+                text="Where the automatic threshold starts, and the level used to flatten uneven lighting. The Threshold step's slider is the main control; change this only to tune what Auto begins from."
+              />
             </span>
-            <select value={settings.threshold_mode} onChange={setStr('threshold_mode')}>
-              <option value="half_contrast">Half contrast (adaptive)</option>
-              <option value="fixed">Fixed (slider value)</option>
+            <input type="range" style={fillStyle(seed, 1, 100)} min={1} max={100} step={0.1} value={seed} onChange={setSeed} />
+            <output className="range-value">{seed.toFixed(1)}</output>
+          </label>
+
+          <label>
+            <span className="label-row">
+              <span>Threshold mode</span>
+              <HelpTip label="Threshold mode" text="Auto ('half contrast') puts the edge midway between paper and particle brightness, which sizes pale or blurry grounds more accurately. Manual ('fixed') uses the percent chosen in the Threshold step. Moving that slider switches this to Manual; its Auto button switches it back." />
+            </span>
+            <select value={settings.threshold_mode} onChange={setThresholdMode}>
+              <option value="half_contrast">Auto (half contrast)</option>
+              <option value="fixed">Manual (fixed percent)</option>
             </select>
           </label>
 

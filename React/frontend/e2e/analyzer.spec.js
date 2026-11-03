@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import {
   openAnalyzer, uploadFixture, setScale, detect, clickImage, imageToPage,
-  particleCount, trackErrors, GRID, engineLogLength, waitForEngineOp,
+  particleCount, trackErrors, GRID, engineLogLength, waitForEngineOp, waitForAutoDetect,
 } from './helpers.js'
 
 test.describe('analyzer workflow', () => {
@@ -38,12 +38,18 @@ test.describe('analyzer workflow', () => {
     expect(errors).toEqual([])
   })
 
-  test('Detect is unavailable until the scale is set', async ({ page }) => {
+  test('Threshold is unavailable until the scale is set, then detects by itself', async ({ page }) => {
     await openAnalyzer(page)
     await uploadFixture(page)
-    await expect(page.getByRole('button', { name: /detect particles/i })).toBeDisabled()
+    const thresholdStep = page.locator('.step[data-step=threshold]')
+    await expect(thresholdStep).toBeDisabled()
+    const from = await engineLogLength(page)
+    await page.keyboard.press('Enter') // no scale: detecting is refused, not started
+    await page.waitForTimeout(300)
+    expect(await engineLogLength(page)).toBe(from)
     await setScale(page)
-    await expect(page.getByRole('button', { name: /detect particles/i })).toBeEnabled()
+    await waitForAutoDetect(page, from)
+    await expect(thresholdStep).toHaveAttribute('aria-current', 'step')
   })
 })
 
@@ -53,28 +59,32 @@ test.describe('analyzer UI acceptance', () => {
     await uploadFixture(page)
     await setScale(page)
     await detect(page)
-    for (const [w, h] of [[1440, 900], [1280, 800], [1024, 768], [390, 844]]) {
-      await page.setViewportSize({ width: w, height: h })
-      await page.waitForTimeout(250)
-      const overflow = await page.evaluate(() => {
-        const bad = []
-        if (document.documentElement.scrollWidth > window.innerWidth) bad.push('document')
-        for (const el of document.querySelectorAll('.results-column *, .toolbar *, .histogram-stat-row')) {
-          if (!(el instanceof SVGElement) && el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflow === 'visible' && el.clientWidth > 0) {
-            bad.push(`${el.tagName}.${String(el.className?.baseVal ?? el.className)}`)
+    // Threshold is a taller card by design (steps, then the control); Clean up keeps the one-row toolbar.
+    for (const step of ['3', '4']) {
+      await page.keyboard.press(step)
+      for (const [w, h] of [[1440, 900], [1280, 800], [1024, 768], [390, 844]]) {
+        await page.setViewportSize({ width: w, height: h })
+        await page.waitForTimeout(250)
+        const overflow = await page.evaluate(() => {
+          const bad = []
+          if (document.documentElement.scrollWidth > window.innerWidth) bad.push('document')
+          for (const el of document.querySelectorAll('.results-column *, .toolbar *, .histogram-stat-row')) {
+            if (!(el instanceof SVGElement) && el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflow === 'visible' && el.clientWidth > 0) {
+              bad.push(`${el.tagName}.${String(el.className?.baseVal ?? el.className)}`)
+            }
           }
-        }
-        return bad
-      })
-      expect(overflow, `overflow at ${w}px`).toEqual([])
-      if (w >= 1280) {
-        const tb = await page.evaluate(() => {
-          const t = document.querySelector('.toolbar')
-          const tops = [...t.children].map((c) => c.offsetTop)
-          return { h: t.getBoundingClientRect().height, spread: Math.max(...tops) - Math.min(...tops) }
+          return bad
         })
-        expect(tb.h, `toolbar height at ${w}`).toBeLessThanOrEqual(56)
-        expect(tb.spread, `toolbar row spread at ${w}`).toBeLessThanOrEqual(4)
+        expect(overflow, `overflow at ${w}px, step ${step}`).toEqual([])
+        if (w >= 1280 && step === '4') {
+          const tb = await page.evaluate(() => {
+            const t = document.querySelector('.toolbar')
+            const tops = [...t.children].map((c) => c.offsetTop)
+            return { h: t.getBoundingClientRect().height, spread: Math.max(...tops) - Math.min(...tops) }
+          })
+          expect(tb.h, `toolbar height at ${w}`).toBeLessThanOrEqual(56)
+          expect(tb.spread, `toolbar row spread at ${w}`).toBeLessThanOrEqual(4)
+        }
       }
     }
   })
@@ -94,9 +104,10 @@ test.describe('analyzer UI acceptance', () => {
     await detect(page)
     await page.keyboard.press('2')
     await expect(page.locator('.step[aria-current="step"]')).toHaveCount(1)
-    const detectStep = page.locator('.step', { hasText: 'Detect' }).first()
-    await expect(detectStep).not.toHaveAttribute('aria-current', 'step')
-    const bg = await detectStep.evaluate((el) => getComputedStyle(el).backgroundColor)
+    await expect(page.locator('.step[data-step=reference]')).toHaveAttribute('aria-current', 'step')
+    const thresholdStep = page.locator('.step[data-step=threshold]')
+    await expect(thresholdStep).not.toHaveAttribute('aria-current', 'step')
+    const bg = await thresholdStep.evaluate((el) => getComputedStyle(el).backgroundColor)
     expect(bg).not.toBe('rgb(212, 135, 74)')
 
     await page.keyboard.press('4')
@@ -127,7 +138,8 @@ test.describe('analyzer UI acceptance', () => {
   test('coin guide circle is drawn after the first click', async ({ page }) => {
     await openAnalyzer(page)
     await uploadFixture(page)
-    await page.keyboard.press('1')
+    await page.keyboard.press('2')
+    await page.locator('[data-testid=scale-preset]').selectOption('US Quarter') // a coin draws the circle, a ruler a line
     const p1 = await imageToPage(page, 200, 300)
     const p2 = await imageToPage(page, 360, 300)
     await page.mouse.click(p1.x, p1.y)
@@ -163,8 +175,7 @@ test.describe('analyzer UI acceptance', () => {
   test('busy state while detecting', async ({ page }) => {
     await openAnalyzer(page, '?engineDelay=1200')
     await uploadFixture(page)
-    await setScale(page)
-    await page.keyboard.press('Enter')
+    await setScale(page) // Threshold detects on its own
     await expect(page.locator('.canvas-area[aria-busy="true"]')).toBeVisible()
     await expect(page.locator('.canvas-area').getByText(/Detecting particles/)).toBeVisible()
     await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 30_000 })

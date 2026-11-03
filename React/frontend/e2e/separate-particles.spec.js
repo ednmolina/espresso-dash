@@ -330,7 +330,7 @@ test.describe('busy label while a split is running', () => {
     const run = page.keyboard.press('Enter')
     await expect(page.locator('.busy-title')).toHaveText('Separating touching particles…', { timeout: 30_000 })
     await expect(page.locator('[role=progressbar]')).toHaveAttribute('aria-label', 'Separating touching particles…')
-    await expect(page.locator('.toolbar-primary')).toHaveText('Detecting…') // the Detect button keeps its label
+    await expect(page.locator('.step[data-step=threshold] .spinner')).toBeVisible() // the Threshold step shows it is detecting
     await run
     await expect(page.locator('[data-testid=split-note]')).toBeVisible({ timeout: 30_000 })
     const onLabels = await page.evaluate(() => window.__busyLabels.slice())

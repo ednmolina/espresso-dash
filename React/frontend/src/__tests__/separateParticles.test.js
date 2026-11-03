@@ -66,6 +66,15 @@ describe('analysisSettingsPayload', () => {
     expect(stripped).toEqual([])
   })
 
+  it('cloud: strips flatten_threshold_percent (a manual threshold on-device); on-device keeps it', () => {
+    const manual = { ...DEFAULT_SETTINGS, threshold_mode: 'fixed', threshold_percent: 61.3, flatten_threshold_percent: 50 }
+    const cloud = analysisSettingsPayload(manual, { isLocal: false })
+    expect('flatten_threshold_percent' in cloud.body).toBe(false)
+    expect(cloud.body.threshold_percent).toBe(61.3)
+    expect(cloud.stripped).toEqual([]) // silent: nothing to tell the user
+    expect(analysisSettingsPayload(manual, { isLocal: true }).body.flatten_threshold_percent).toBe(50)
+  })
+
   it('cloud keeps the existing volume models', () => {
     for (const volume_model of ['legacy', 'spheroid']) {
       expect(analysisSettingsPayload({ ...DEFAULT_SETTINGS, volume_model }, { isLocal: false }).body.volume_model).toBe(volume_model)

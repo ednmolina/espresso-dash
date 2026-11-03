@@ -5,6 +5,11 @@ const MIN_ZOOM = 0.1
 const MAX_ZOOM = 20
 const ZOOM_SPEED = 0.001
 const PINCH_MIN_DISTANCE = 8
+// A tap that places a point. Mouse keeps a tight slop and no time limit; touch and pen are held
+// to a short, nearly still press so a pan, a pinch or a long press never leaves a mark.
+const MOUSE_SLOP_PX = 3
+const TOUCH_SLOP_PX = 6
+const TOUCH_TAP_MAX_MS = 350
 
 /**
  * ImageCanvas
@@ -13,7 +18,8 @@ const PINCH_MIN_DISTANCE = 8
  *   imageSrc        – base64 data URL of the image to display
  *   imageWidth      – original image width in pixels
  *   imageHeight     – original image height in pixels
- *   mode            – 'reference' | 'polygon' | 'erase' | 'view'
+ *   mode            – 'reference' | 'polygon' | 'erase' | 'threshold' | 'view'
+ *                     ('threshold' and 'view' only pan and zoom: a tap places nothing)
  *   referencePoints – [{x, y}, ...] in original image coords (max 2)
  *   polygonPoints   – [{x, y}, ...] in original image coords
  *   erasePoints     – [{x, y}, ...] in original image coords
@@ -24,6 +30,7 @@ const PINCH_MIN_DISTANCE = 8
  *                     the on-device engine passes this instead of a string
  *   pixelScale      – px per mm once the coin is measured (for the guide label)
  *   referenceMm     – physical size of the reference object
+ *   referenceCircle – draw the coin circle between the two scale points (false for a ruler)
  *   onEraseRadiusChange – (r) => void  ([ and ] keys)
  *   onPolygonClose  – () => void  user clicked the first region point to close
  */
@@ -45,6 +52,7 @@ export default function ImageCanvas({
   layerImage = null,
   pixelScale = null,
   referenceMm = 0,
+  referenceCircle = true,
   onEraseRadiusChange,
   onPolygonClose,
 }) {
@@ -154,7 +162,7 @@ export default function ImageCanvas({
     _drawReferencePoints(ctx)
     _drawErasePoints(ctx)
     _drawBrushPreview(ctx)
-  }, [imageWidth, imageHeight, referencePoints, polygonPoints, erasePoints, eraseRadius, mode, pixelScale, referenceMm])
+  }, [imageWidth, imageHeight, referencePoints, polygonPoints, erasePoints, eraseRadius, mode, pixelScale, referenceMm, referenceCircle])
 
   function _coinGuide(ctx, p1, p2, live) {
     const cx = (p1.x + p2.x) / 2
@@ -164,10 +172,12 @@ export default function ImageCanvas({
     ctx.save()
     ctx.strokeStyle = COLORS.scale
     ctx.lineWidth = 1.5
-    ctx.setLineDash(live ? [6, 4] : [])
-    ctx.beginPath()
-    ctx.arc(cx, cy, r, 0, Math.PI * 2)
-    ctx.stroke()
+    if (referenceCircle) {
+      ctx.setLineDash(live ? [6, 4] : [])
+      ctx.beginPath()
+      ctx.arc(cx, cy, r, 0, Math.PI * 2)
+      ctx.stroke()
+    }
     ctx.setLineDash([])
     ctx.beginPath()
     ctx.moveTo(p1.x, p1.y)
@@ -185,7 +195,8 @@ export default function ImageCanvas({
       ctx.fillStyle = 'rgba(18,14,11,0.85)'
       ctx.strokeStyle = COLORS.scale
       ctx.lineWidth = 1
-      const ly = w < r * 2 - 28 ? cy : cy + r + 18
+      // coin: inside the circle when it fits, else below it; ruler: just above the line
+      const ly = !referenceCircle ? cy - 26 : w < r * 2 - 28 ? cy : cy + r + 18
       ctx.beginPath()
       ctx.roundRect(cx - w / 2, ly - 11, w, 22, 11)
       ctx.fill()
@@ -209,6 +220,15 @@ export default function ImageCanvas({
     }
 
     pts.forEach(({ x, y }, i) => {
+      // a halo keeps the point findable under a fingertip
+      ctx.beginPath()
+      ctx.arc(x, y, POINT_RADIUS + 10, 0, Math.PI * 2)
+      ctx.fillStyle = 'rgba(255, 176, 0, 0.18)'
+      ctx.fill()
+      ctx.strokeStyle = 'rgba(255, 176, 0, 0.7)'
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+
       ctx.beginPath()
       ctx.arc(x, y, POINT_RADIUS, 0, Math.PI * 2)
       ctx.fillStyle = '#ffb000'
@@ -437,7 +457,12 @@ export default function ImageCanvas({
 
   const getTrackedPointers = useCallback(() => Array.from(pointersRef.current.values()), [])
 
-  const beginSinglePointerGesture = useCallback((point) => {
+  // One gesture lasts from the first pointer down to the last pointer up. A point is only ever
+  // placed by a gesture that had exactly one pointer the whole time and stayed put (and, for touch
+  // and pen, was short): lifting the last finger of a pinch, or a cancelled touch, never counts.
+  const slopFor = (gesture) => (gesture.pointerType === 'mouse' ? MOUSE_SLOP_PX : TOUCH_SLOP_PX)
+
+  const beginSinglePointerGesture = useCallback((point, { pointerType, startT, multi = false } = {}) => {
     gestureRef.current = {
       type: 'single',
       startX: point.x,
@@ -445,6 +470,9 @@ export default function ImageCanvas({
       panX: viewRef.current.panX,
       panY: viewRef.current.panY,
       moved: false,
+      multi,
+      pointerType: pointerType ?? gestureRef.current.pointerType ?? 'mouse',
+      startT: startT ?? 0,
     }
   }, [])
 
@@ -464,6 +492,8 @@ export default function ImageCanvas({
       startZoom: viewRef.current.zoom,
       anchorImage: canvasToImage(center.x, center.y),
       moved: true,
+      multi: true,
+      pointerType: gestureRef.current.pointerType,
     }
   }, [canvasToImage, getTrackedPointers])
 
@@ -477,7 +507,7 @@ export default function ImageCanvas({
     pointersRef.current.set(event.pointerId, point)
 
     if (pointersRef.current.size === 1) {
-      beginSinglePointerGesture(point)
+      beginSinglePointerGesture(point, { pointerType: event.pointerType, startT: event.timeStamp })
     } else if (pointersRef.current.size >= 2) {
       beginPinchGesture()
     }
@@ -526,8 +556,9 @@ export default function ImageCanvas({
 
     const dx = point.x - gesture.startX
     const dy = point.y - gesture.startY
+    const slop = slopFor(gesture)
 
-    if (!gesture.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+    if (!gesture.moved && (Math.abs(dx) > slop || Math.abs(dy) > slop)) {
       gesture.moved = true
     }
 
@@ -538,13 +569,17 @@ export default function ImageCanvas({
     }
   }, [getCanvasPoint, getTrackedPointers, updatePinchView, mode, referencePoints.length, polygonPoints.length, requestPreviewRedraw])
 
-  const finishPointer = useCallback((event) => {
+  const endPointer = useCallback((event, cancelled) => {
     const point = pointersRef.current.get(event.pointerId)
     const gesture = gestureRef.current
 
     pointersRef.current.delete(event.pointerId)
 
-    if (gesture.type === 'single' && point && !gesture.moved && mode !== 'view') {
+    const tracksTap = gesture.type === 'single' && !gesture.multi && point && !gesture.moved &&
+      mode !== 'view' && mode !== 'threshold'
+    const isTap = tracksTap && !cancelled &&
+      (gesture.pointerType === 'mouse' || event.timeStamp - gesture.startT < TOUCH_TAP_MAX_MS)
+    if (isTap) {
       const { x, y } = canvasToImage(point.x, point.y)
       const ix = Math.max(0, Math.min(imageWidth, x))
       const iy = Math.max(0, Math.min(imageHeight, y))
@@ -561,19 +596,28 @@ export default function ImageCanvas({
     }
 
     if (pointersRef.current.size === 1) {
+      // the finger left over after a pinch may still pan, but can no longer place a point
       const [remaining] = getTrackedPointers()
-      beginSinglePointerGesture(remaining)
+      beginSinglePointerGesture(remaining, { multi: true })
       return
     }
 
-    gestureRef.current = { type: 'idle', moved: false }
+    gestureRef.current = { type: 'idle', moved: false, multi: false }
   }, [beginPinchGesture, beginSinglePointerGesture, canvasToImage, imageToCanvas, getTrackedPointers, imageHeight, imageWidth, mode, onPointAdded, onPolygonClose, polygonPoints])
+
+  const finishPointer = useCallback((event) => endPointer(event, false), [endPointer])
+  const cancelPointer = useCallback((event) => endPointer(event, true), [endPointer])
+  // Capture lost while a pointer is still tracked (it normally follows pointerup, when the pointer is gone
+  // already): the gesture is over without a lift, so it can never place a point.
+  const lostCapture = useCallback((event) => {
+    if (pointersRef.current.has(event.pointerId)) endPointer(event, true)
+  }, [endPointer])
 
   // -------------------------------------------------------------------------
   // Cursor style
   // -------------------------------------------------------------------------
 
-  const cursor = mode === 'view' ? 'grab' : mode === 'erase' ? 'none' : 'crosshair'
+  const cursor = mode === 'view' || mode === 'threshold' ? 'grab' : mode === 'erase' ? 'none' : 'crosshair'
 
   // -------------------------------------------------------------------------
   // Keyboard: zoom, brush size, arrow-key panning
@@ -614,9 +658,10 @@ export default function ImageCanvas({
   }, [zoomAboutCentre, fitToCanvas, setZoomOneToOne, onEraseRadiusChange, eraseRadius, flashBrush])
 
   const modeLabel = {
-    reference: 'Click the two edges of the reference coin',
+    reference: 'Tap both ends of the reference length',
     polygon: 'Click points to outline the grounds region',
     erase: 'Click stray clusters to mark them for removal',
+    threshold: 'Pan and zoom the photo',
     view: 'Pan and zoom the photo',
   }[mode]
 
@@ -636,7 +681,8 @@ export default function ImageCanvas({
         onPointerMove={onPointerMove}
         onPointerLeave={() => { hoverRef.current = null; requestPreviewRedraw() }}
         onPointerUp={finishPointer}
-        onPointerCancel={finishPointer}
+        onPointerCancel={cancelPointer}
+        onLostPointerCapture={lostCapture}
       />
       {brushFlash && mode === 'erase' && <div className="brush-flash" role="status">Brush {eraseRadius} px</div>}
       <div className="canvas-hud hud-zoom" role="group" aria-label="Zoom">

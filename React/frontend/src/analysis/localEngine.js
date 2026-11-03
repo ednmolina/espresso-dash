@@ -1,6 +1,6 @@
 // Main-thread front for the on-device engine.
 //
-//   createLocalEngine() -> { upload(file, {expect}), analyze, erase, histogram, compare, preview,
+//   createLocalEngine() -> { upload(file, {expect}), analyze, thresholdPreview, dropPreviewCache, erase, histogram, compare, preview,
 //                            cancel(), dispose(), onProgress(cb) -> unsubscribe }
 //
 // Where things run:
@@ -316,6 +316,36 @@ export function createLocalEngine({ forceInline = false } = {}) {
     })
   }
 
+  /**
+   * Threshold overlay for another percent on the latest analysis. Never cancels anything: it is
+   * meant to be superseded by simply ignoring older answers. Resolves {stale: true} when there is no
+   * matching analysis (none yet, polygon/image changed, or the worker was restarted by cancel()).
+   */
+  function thresholdPreview(body) {
+    // After cancel() (or a worker crash) nothing is registered: stale, and no worker is spawned for it.
+    if (registeredId !== body?.image_id) return Promise.resolve({ stale: true })
+    return withWorkerFallback(async () => {
+      if (hasWorker) {
+        const result = await call('thresholdPreview', body)
+        return result.stale ? result : layersToImages(result, null)
+      }
+      return runInline(async ({ engine, layerToRgba }) => {
+        const result = engine.thresholdPreview(body)
+        return result.stale ? result : layersToImages(result, layerToRgba)
+      })
+    })
+  }
+
+  /** Frees the engine's threshold-preview cache; later previews answer {stale: true} until the next analyze. */
+  function dropPreviewCache() {
+    // nothing registered (no worker, or after cancel): nothing to free, and no worker is spawned for it
+    if (registeredId == null) return Promise.resolve({ ok: true })
+    return withWorkerFallback(async () => {
+      if (hasWorker) return call('dropPreviewCache', {})
+      return runInline(async ({ engine }) => { engine.dropPreviewCache(); return { ok: true } })
+    }).catch(() => ({ ok: true }))
+  }
+
   function erase(body) {
     return withWorkerFallback(async () => {
       if (hasWorker) return layersToImages(await call('erase', body), null)
@@ -377,5 +407,5 @@ export function createLocalEngine({ forceInline = false } = {}) {
     return () => listeners.delete(cb)
   }
 
-  return { upload, analyze, erase, histogram, compare, preview, cancel, dispose, onProgress }
+  return { upload, analyze, thresholdPreview, dropPreviewCache, erase, histogram, compare, preview, cancel, dispose, onProgress }
 }
