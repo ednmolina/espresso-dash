@@ -456,3 +456,34 @@ label.el-btn-tinted:hover { background: var(--el-separator); }
 @media (max-width: 640px) {
   .el-diagnostics .el-row { min-height: 46px; padding-top: 3px; padding-bottom: 3px; }
 }
+
+/* ---- Grind target + suggestions ------------------------------------------------------------------ */
+
+.el-target-seg { align-self: flex-start; }
+.el-target-seg .el-seg-items { width: 100%; }
+.el-target-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.el-target-row .el-target-seg { flex: 1 1 auto; min-width: 0; }
+.el-target-row .el-seg-items { width: 100%; }
+.el-target-row .el-seg-item { flex: 1 1 0; padding: 0 10px; white-space: nowrap; }
+.el-target-row .el-btn-tinted { flex: none; }
+.el-forecast-inputs .el-target-seg { display: flex; margin-top: 4px; }
+.el-forecast-inputs .el-target-seg .el-seg-item { flex: 1 1 0; }
+.el-suggest-note { font-size: 14px; font-weight: 500; margin-top: 6px; }
+.el-forecast-inputs .el-suggest-note { margin-top: -6px; }
+
+.el-gs-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.el-gs-tile { display: flex; flex-direction: column; gap: 2px; padding: 14px 16px; border-radius: var(--el-r); background: var(--el-bg); }
+.el-card .el-gs-tile { background: var(--el-fill); }
+.el-gs-tile-title { font-size: 14px; font-weight: 600; }
+.el-gs-tile-n { font-size: 13px; color: var(--el-text-2); }
+.el-gs-big { font-size: 32px; line-height: 1.15; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; margin-top: 6px; }
+.el-gs-big small { font-size: 16px; font-weight: 500; color: var(--el-text-2); margin-left: 1px; letter-spacing: 0; }
+.el-gs-sub { font-size: 13px; color: var(--el-text-2); }
+.el-gs-tile .el-meter { margin-top: 8px; }
+.el-gs-within { font-size: 13px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.el-gs-direction { display: flex; align-items: flex-start; gap: 10px; margin-top: 14px; font-size: 14px; line-height: 1.4; }
+.el-gs-direction .el-headline-icon { flex: none; width: 22px; height: 22px; font-size: 13px; }
+.el-gs-foot { margin-top: 12px; }
+.el-diag-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .el-diag-pair { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 640px) { .el-gs-tiles { gap: 10px; } .el-gs-big { font-size: 28px; } }

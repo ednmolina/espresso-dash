@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { parsePhInput } from '../../dashboardData'
-import { coffeeKey, forecast, listCoffees, suggestGrind, sweepGrind } from '../../forecastModel'
+import { coffeeKey, forecast, listCoffees, suggestGrind, sweepGrind, targetFor } from '../../forecastModel'
 import { parseSetting, settingToIndex } from '../../grindCalibration'
+import { targetLine, useGrindTargetMode } from '../../grindTargetPref'
 import { useNav } from '../../navigation'
 import { useShots } from '../../shotsStore'
 import { useForecastModel, useGrindCalibration } from '../../useModels'
 import GrindSettingPicker from '../pages/GrindSettingPicker'
 import { ChartLegend, OddsBar, SweepChart } from '../pages/pageCharts'
-import { InsetGroup, ListRow, PageHeader, Sheet, useBreakpoint } from '../shell'
+import { InsetGroup, ListRow, PageHeader, SegmentedControl, Sheet, useBreakpoint } from '../shell'
 import '../pages/pages.css'
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
@@ -18,6 +19,11 @@ const num = (text) => {
 }
 const fmt1 = (v) => (finite(v) ? v.toFixed(1) : '—')
 const trimNum = (v) => (finite(Number(v)) && v !== '' && v !== null && v !== undefined ? String(Number(v)) : '')
+
+const TARGET_OPTIONS = [
+  { id: 'fixed', label: '20%' },
+  { id: 'best', label: 'Best for this coffee' },
+]
 
 const PH_HINT = '3.5–8.0. Left blank, pH is ignored rather than guessed.'
 
@@ -75,6 +81,7 @@ export default function ForecastPage() {
   const [ph, setPh] = useState('')
   const [grind, setGrind] = useState('10E')
   const [note, setNote] = useState('')
+  const [targetMode, setTargetMode] = useGrindTargetMode()
   const [sheet, setSheet] = useState(null)
   const appliedParams = useRef(null)
 
@@ -128,22 +135,27 @@ export default function ForecastPage() {
   const coffeeEntry = coffees.find((c) => c.key === coffee)
   const coffeeLabelText = coffeeEntry?.label ?? 'No coffee yet'
 
+  const target = useMemo(() => targetFor(shots || [], coffee, targetMode), [shots, coffee, targetMode])
+  const targetText = targetLine(target)
+  const onTargetMode = (mode) => { setTargetMode(mode); setNote('') }
+
   const onSuggest = () => {
-    const s = suggestGrind(model, planned)
+    const s = suggestGrind(model, planned, target.target)
     if (s && s.setting) {
       setGrind(s.setting)
-      setNote(`Suggested ${s.setting}, expected about ${fmt1(s.extraction)}%.`)
+      const um = cal.estimate(s.setting)?.um
+      setNote(`Suggested ${s.setting}${finite(um) ? ` · ≈ ${Math.round(um)} µm` : ''} · expected ${fmt1(s.extraction)}%`)
       return
     }
     // The forecast has not learned an effect of grind yet, so fall back to what actually happened:
-    // the shot of this coffee that landed closest to 20%.
+    // the shot of this coffee that landed closest to the target.
     const closest = (shots || [])
       .filter((x) => coffeeKey(x) === coffee && finite(x.extraction) && parseSetting(x.grindSetting))
-      .sort((a, b) => Math.abs(a.extraction - 20) - Math.abs(b.extraction - 20))[0]
+      .sort((a, b) => Math.abs(a.extraction - target.target) - Math.abs(b.extraction - target.target))[0]
     if (closest) {
       const label = parseSetting(closest.grindSetting).label
       setGrind(label)
-      setNote(`The forecast has not learned a grind effect yet. Your closest shot to 20% used ${label} (${fmt1(closest.extraction)}%).`)
+      setNote(`The forecast has not learned a grind effect yet. Your closest shot to ${fmt1(target.target)}% used ${label} (${fmt1(closest.extraction)}%).`)
     } else {
       setNote('No suggestion yet: log a shot of this coffee with its grind setting.')
     }
@@ -207,6 +219,19 @@ export default function ForecastPage() {
     </>
   ) : <p className="muted">The curve appears once a forecast is available.</p>)
 
+  const targetControl = (
+    <SegmentedControl
+      options={TARGET_OPTIONS}
+      value={targetMode}
+      onChange={onTargetMode}
+      ariaLabel="Aim for"
+      role="radiogroup"
+      className="el-target-seg"
+      testIdPrefix="forecast-target-"
+      testId="forecast-target"
+    />
+  )
+
   const phField = (
     <div className="el-field">
       <label className="el-field-label" htmlFor="forecast-ph">pH (optional)</label>
@@ -242,11 +267,15 @@ export default function ForecastPage() {
           <GrindSettingPicker value={grind} onChange={setGrindManual} layout="stepper" size="lg" label="Grind setting" testId="forecast-grind" />
           <div className="el-grind-foot">
             <span className="muted">Finer ← → Coarser</span>
+          </div>
+          <div className="el-target-row">
+            {targetControl}
             <button type="button" className="el-btn-tinted is-small" data-testid="forecast-suggest" onClick={onSuggest} disabled={!available}>
-              Suggest closest to 20%
+              Suggest
             </button>
           </div>
-          {note ? <p className="el-hint" role="status">{note}</p> : null}
+          <p className="el-hint" data-testid="forecast-target-line">{targetText}</p>
+          {note ? <p className="el-suggest-note" role="status" data-testid="forecast-suggest-note">{note}</p> : null}
         </section>
         <InsetGroup>
           <ListRow title="Coffee" detail={coffeeLabelText} onClick={() => setSheet('coffee')} testId="forecast-coffee-row" />
@@ -338,10 +367,15 @@ export default function ForecastPage() {
               <span className="muted" data-testid="forecast-grind-um">{grindEst ? `≈ ${Math.round(grindEst.um)} µm (est.)` : 'no µm estimate yet'}</span>
             </div>
           </div>
+          <div className="el-field">
+            <span className="el-field-label" id="forecast-aim-label">Aim for</span>
+            {targetControl}
+            <p className="el-hint" data-testid="forecast-target-line">{targetText}</p>
+          </div>
           <button type="button" className="el-btn-tinted is-block" data-testid="forecast-suggest" onClick={onSuggest} disabled={!available}>
-            Suggest the grind closest to 20%
+            Suggest grind
           </button>
-          {note ? <p className="el-hint" role="status" data-testid="forecast-suggest-note">{note}</p> : null}
+          {note ? <p className="el-suggest-note" role="status" data-testid="forecast-suggest-note">{note}</p> : null}
         </section>
         <div className="el-forecast-side">
           {hero}

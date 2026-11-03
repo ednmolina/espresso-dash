@@ -16,12 +16,15 @@ import { histogramKind, layerOf, mergeErase, normalizeSummary, previewSrc, saved
 import { useShots } from '../shotsStore'
 import { useGrindCalibration } from '../useModels'
 import { addRun, runFromSummary } from '../calibrationStore'
+import { addCheck } from '../repeatStore'
+import { checkFromRuns, dvFromSummary } from '../precision'
 import { clearLatestAnalysis, markLatestAnalysisErased, setLatestAnalysis } from '../analysisSession'
 import { parseSetting } from '../grindCalibration'
 import { useNav } from '../navigation'
 import '../analyzer.css'
 
 const HIDDEN_KEY = 'espressoLab.analyzer.resultsHidden.v1'
+const MAX_SAVED_RUNS = 5 // the compare engine takes up to 6; the table and chart colours cycle after 3
 
 function readHidden() {
   try {
@@ -127,6 +130,14 @@ function SlidersIcon() {
   )
 }
 
+function NoteIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true" className="note-icon">
+      <circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 7.5v.5" />
+    </svg>
+  )
+}
+
 function RulerIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="note-icon">
@@ -206,6 +217,8 @@ export default function AnalyzerApp({ user }) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [grindSetting, setGrindSetting] = useState('')
   const [calSavedFor, setCalSavedFor] = useState(null)
+  const [repeatSavedFor, setRepeatSavedFor] = useState(null) // key of the saved-run set kept as a repeat check
+  const runUid = useRef(0)
   const [resultsHidden, setResultsHidden] = useState(readHidden)
   const [sheetDetent, setSheetDetent] = useState('half') // phone: 'half' | 'full' while the results are shown
   const [sheetOpened, setSheetOpened] = useState(false) // phone: the sheet was opened by hand during Threshold
@@ -393,6 +406,7 @@ export default function AnalyzerApp({ user }) {
       cancelLostRuns.current = true
       setSavedRuns([])
       setCompare(null)
+      setRepeatSavedFor(null)
     }
   }
   // Status text for a cancelled operation; says so when the saved runs went with it.
@@ -842,10 +856,13 @@ export default function AnalyzerApp({ user }) {
 
   const saveRun = () => {
     if (!analysisResult || !imageId) return
-    if (savedRuns.length >= 3) return
+    if (savedRuns.length >= MAX_SAVED_RUNS) return
     const label = `Run ${savedRuns.length + 1}`
+    runUid.current += 1
+    const uid = runUid.current
     setSavedRuns((prev) => [...prev, {
       label,
+      uid,
       // frozen server-side copy of this analysis (falls back for older servers)
       imageId: analysisResult.analysis_id ?? imageId,
       removedIds: [...removedIds],
@@ -856,6 +873,32 @@ export default function AnalyzerApp({ user }) {
   }
 
   const parsedSetting = parseSetting(grindSetting)
+
+  // Repeatability of the saved runs (photos of one sample): Dv10/50/90 in um from each run's own summary.
+  // Old-API summaries without Dv fields simply give no row.
+  const repeatRuns = useMemo(() => savedRuns.map((r) => dvFromSummary(r.summary)), [savedRuns])
+  const repeat = useMemo(
+    () => (savedRuns.length >= 2 ? checkFromRuns(repeatRuns) : null),
+    [savedRuns.length, repeatRuns],
+  )
+  const repeatRows = repeat
+    ? [['dv10', 'Dv10'], ['dv50', 'Dv50'], ['dv90', 'Dv90']].filter(([key]) => repeat[key]).map(([key, label]) => ({ key, label, ...repeat[key] }))
+    : []
+  const repeatKey = savedRuns.map((r) => r.uid).join(',')
+  const repeatDone = repeatSavedFor !== null && repeatSavedFor === repeatKey
+  const dv50Row = repeatRows.find((r) => r.key === 'dv50')
+
+  const saveRepeatCheck = () => {
+    if (repeatRows.length === 0 || repeatDone || busy) return
+    const res = addCheck({ grindSetting: parsedSetting ? parsedSetting.label : null, runs: repeatRuns })
+    if (!res?.ok) { say(`Could not save the repeat check${res?.error ? `: ${res.error}` : ''}`, 'error'); return }
+    setRepeatSavedFor(repeatKey)
+    say(
+      `Repeat check saved (${savedRuns.length} photos${parsedSetting ? ` · ${parsedSetting.label}` : ''}).${res.persisted === false ? ' It could not be stored in this browser, so it will be gone after a reload.' : ''}`,
+      res.persisted === false ? 'info' : 'success',
+    )
+  }
+
   const calibrationDone = calSavedFor != null && calSavedFor === summary
   const canSaveCalibration = Boolean(summary && parsedSetting && !calibrationDone && !busy)
   const calibrationTitle = !summary
@@ -943,6 +986,7 @@ export default function AnalyzerApp({ user }) {
   const clearRuns = () => {
     setSavedRuns([])
     setCompare(null)
+    setRepeatSavedFor(null)
   }
 
   // Download menu: close on outside click and Esc.
@@ -1235,7 +1279,7 @@ export default function AnalyzerApp({ user }) {
   const runsPanel = analysisResult ? (
     <section className="runs-panel" aria-label="Runs">
       <div className="results-actions">
-        <button type="button" onClick={saveRun} disabled={busy || savedRuns.length >= 3}>Save run ({savedRuns.length}/3)</button>
+        <button type="button" onClick={saveRun} disabled={busy || savedRuns.length >= MAX_SAVED_RUNS}>Save run ({savedRuns.length}/{MAX_SAVED_RUNS})</button>
         <div className={`download-menu ${downloadsOpen ? 'open' : ''}`} ref={downloadRef}>
           <button type="button" onClick={() => setDownloadsOpen((prev) => !prev)} aria-expanded={downloadsOpen} aria-haspopup="menu">
             Download ▾
@@ -1268,7 +1312,7 @@ export default function AnalyzerApp({ user }) {
             <tbody>
               {savedRuns.map((run, i) => (
                 <tr key={run.label}>
-                  <td><i className="run-swatch" style={{ background: SERIES_COLORS[i] }} />{savedRunLabel(run)}</td>
+                  <td><i className="run-swatch" style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }} />{savedRunLabel(run)}</td>
                   <td>{isNum(run.summary?.cluster_count) ? run.summary.cluster_count.toLocaleString() : '—'}</td>
                   <td>{um(run.summary?.dv50_mm)}</td>
                   <td>
@@ -1280,6 +1324,47 @@ export default function AnalyzerApp({ user }) {
               ))}
             </tbody>
           </table>
+          {repeatRows.length > 0 && (
+            <div className="repeat-box" role="group" aria-labelledby="repeat-title" data-testid="repeatability">
+              <div>
+                <h3 id="repeat-title">Repeatability</h3>
+                <p className="repeat-sub">Mean ± SD across {savedRuns.length} photos of the same sample</p>
+              </div>
+              <div className="repeat-rows">
+                {repeatRows.map((row) => (
+                  <div className="repeat-row" key={row.key} data-testid={`repeat-${row.key}`}>
+                    <span className="repeat-metric">{row.label}</span>
+                    <span className="repeat-value">
+                      {Math.round(row.mean).toLocaleString()} µm <span className="repeat-sd">± {Math.round(row.sd).toLocaleString()}</span>
+                    </span>
+                    <span className="repeat-cv">CV {(row.cv * 100).toFixed(1)}%</span>
+                  </div>
+                ))}
+              </div>
+              {dv50Row && (
+                <p className="repeat-claim" data-testid="repeat-claim">
+                  One photo is typically within <strong>±{Math.round(dv50Row.cv * 200)}%</strong> (Dv50).
+                </p>
+              )}
+              <p className="repeat-hint">
+                <NoteIcon />
+                <span>Stir or reshuffle the grounds between photos.</span>
+              </p>
+              <div className="repeat-save">
+                <button
+                  type="button"
+                  className="repeat-save-btn"
+                  data-testid="save-repeat-check"
+                  onClick={saveRepeatCheck}
+                  disabled={busy || repeatDone}
+                  title={repeatDone ? 'Already saved for these photos' : undefined}
+                >
+                  Save repeat check
+                </button>
+                <span className="repeat-note">Numbers only, kept on this device</span>
+              </div>
+            </div>
+          )}
           {savedRuns.length >= 2 && !compare && (
             <button type="button" className="btn-primary" onClick={fetchCompareHistogram} disabled={busy}>Compare runs</button>
           )}

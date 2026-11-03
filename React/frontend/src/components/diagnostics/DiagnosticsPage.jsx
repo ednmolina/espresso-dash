@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import { dataCoverage, LIMITS } from '../../forecastModel'
+import { dataCoverage, LIMITS, replaySuggestions } from '../../forecastModel'
+import { useGrindTargetMode } from '../../grindTargetPref'
 import { indexToSetting } from '../../grindCalibration'
 import { useNav } from '../../navigation'
 import { useShots } from '../../shotsStore'
@@ -12,6 +13,8 @@ import {
   ChartLegend, ErrorTimeChart, FitResidualChart, Meter, PredActualChart, RatingCalChart,
 } from '../pages/pageCharts'
 import { InsetGroup, ListRow, PageHeader, PagedRow, Sheet, useBreakpoint } from '../shell'
+import GrindSuggestionsCard, { grindSuggestionsSubtitle } from './GrindSuggestionsCard'
+import PrecisionCard, { precisionSubtitle } from './PrecisionCard'
 import '../pages/pages.css'
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
@@ -172,6 +175,11 @@ export default function DiagnosticsPage() {
   const cal = useGrindCalibration(shots)
   const model = useForecastModel(shots, cal.mean)
   const coverage = useMemo(() => dataCoverage(shots || [], { calibration: { mean: cal.mean } }), [shots, cal.mean])
+  const [grindTargetMode] = useGrindTargetMode()
+  const replay = useMemo(
+    () => replaySuggestions(shots || [], { calibration: cal.mean ? { mean: cal.mean } : null, mode: grindTargetMode }),
+    [shots, cal.mean, grindTargetMode],
+  )
   const [infoOpen, setInfoOpen] = useState(false)
   const [sheet, setSheet] = useState(null)
   const [showDates, setShowDates] = useState(false)
@@ -413,6 +421,8 @@ export default function DiagnosticsPage() {
       { id: 'coverage', title: 'Data coverage', sub: coverage.ph52.count ? `${coverage.ph52.count} shots may have a default pH` : `pH on ${coverage.ph.count} of ${total} shots`, body: coverageBody, testId: 'diag-coverage' },
       { id: 'fit', title: 'Grinder calibration fit', sub: `${fitModel?.n ?? 0} points · ${fitScatter} scatter`, body: fitBody, testId: 'diag-grinder-fit' },
       { id: 'checks', title: 'Photo analysis checks', sub: checksSubtitle(checks), body: null, testId: 'diag-photo-checks', plain: true },
+      { id: 'precision', title: 'Measurement precision', sub: precisionSubtitle(), body: <PrecisionCard phone />, bare: true },
+      { id: 'grind-suggestions', title: 'Grind suggestions', sub: grindSuggestionsSubtitle(replay), body: <GrindSuggestionsCard result={replay} mode={grindTargetMode} phone />, bare: true },
     ]
     const open = rows.find((r) => r.id === sheet)
     return (
@@ -451,7 +461,8 @@ export default function DiagnosticsPage() {
                 </>
               ) : <div className="el-card"><p className="el-pcheck-text">Analyze a photo to see these checks.</p></div>}
             </div>
-          ) : open ? <div className="el-card el-in-sheet" data-testid={open.testId}>{open.body}</div> : null}
+          ) : open?.bare ? open.body
+            : open ? <div className="el-card el-in-sheet" data-testid={open.testId}>{open.body}</div> : null}
         </Sheet>
         <Sheet
           open={sheet === 'info'}
@@ -507,6 +518,10 @@ export default function DiagnosticsPage() {
           </div>
         ) : <p className="el-pcheck-text" data-testid="diag-checks-empty">Analyze a photo to see these checks.</p>}
       </section>
+      <div className="el-diag-pair">
+        <PrecisionCard />
+        <GrindSuggestionsCard result={replay} mode={grindTargetMode} />
+      </div>
     </div>
   )
 }
