@@ -5,7 +5,11 @@
 // Pixels of cluster i live in px_row/px_col[px_start[i] .. px_start[i] + px_len[i]).
 // px_* arrays are shared backing storage: selecting/filtering never copies them.
 
-const F64_COLUMNS = ['surface', 'roundness', 'short_axis', 'long_axis', 'volume', 'xmean', 'ymean', 'edge_weight']
+const F64_COLUMNS = ['surface', 'roundness', 'short_axis', 'long_axis', 'volume', 'xmean', 'ymean', 'edge_weight',
+  'major_axis_measured', 'minor_axis_measured', 'aspect_ratio']
+
+// Moment-fit columns: NaN when absent (remeasureClusters fills them at analyze time).
+const NAN_COLUMNS = new Set(['major_axis_measured', 'minor_axis_measured', 'aspect_ratio'])
 
 const asF64 = (a, n, fill) => {
   if (a instanceof Float64Array && a.length === n) return a
@@ -40,7 +44,7 @@ export function makeDataset(cols, { pixel_scale = null, label = 'Current Data', 
     cluster_id: asI32(cols.cluster_id, n),
   }
   if (cols.cluster_id == null) for (let i = 0; i < n; i++) ds.cluster_id[i] = i
-  for (const name of F64_COLUMNS) ds[name] = asF64(cols[name], n, name === 'edge_weight' ? 1 : 0)
+  for (const name of F64_COLUMNS) ds[name] = asF64(cols[name], n, NAN_COLUMNS.has(name) ? NaN : name === 'edge_weight' ? 1 : 0)
   ds.px_start = asI32(cols.px_start, n)
   ds.px_len = asI32(cols.px_len, n)
   ds.px_row = cols.px_row instanceof Int32Array ? cols.px_row : asI32(cols.px_row, cols.px_row ? cols.px_row.length : 0)

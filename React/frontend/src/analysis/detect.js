@@ -49,13 +49,15 @@ export const DEFAULT_SETTINGS = Object.freeze({
   min_diameter_um: null,
   reference_px_length: null,
   click_sigma_px: 2.0,
+  split_touching: false,
+  split_neck_ratio: 0.7,
 })
 
 const ENUMS = [
   ['background_model', ['global', 'poly4']],
   ['threshold_mode', ['fixed', 'half_contrast']],
   ['axis_method', ['max_radius', 'moments']],
-  ['volume_model', ['legacy', 'spheroid']],
+  ['volume_model', ['legacy', 'spheroid', 'ellipsoid']],
 ]
 
 /** AnalysisSettings(**overrides): unknown keys are ignored, undefined values keep the default. */
@@ -66,6 +68,10 @@ export function makeSettings(overrides = {}) {
   }
   for (const [name, allowed] of ENUMS) {
     if (!allowed.includes(s[name])) throw fail(`${name} must be one of ${allowed.join(', ')}.`)
+  }
+  s.split_touching = !!s.split_touching
+  if (!(s.split_neck_ratio >= 0.3 && s.split_neck_ratio <= 0.95)) {
+    throw fail('split_neck_ratio must be between 0.3 and 0.95.')
   }
   return s
 }
@@ -78,6 +84,7 @@ export function legacySettings(overrides = {}) {
     edge_correction: false,
     axis_method: 'max_radius',
     volume_model: 'legacy',
+    split_touching: false,
     ...overrides,
   })
 }
@@ -300,48 +307,69 @@ export function detectParticles(blue, h, w, thresholdMask, bgMedian, settings, p
 }
 
 /**
- * Recompute axes / roundness / volume of detected clusters in place (surface unchanged).
- * max_radius + legacy leaves the detector output untouched.
+ * Measure every cluster's second moments and (optionally) recompute axes / roundness /
+ * volume in place (surface unchanged).
+ *
+ * The moment fit always runs: it writes major_axis_measured / minor_axis_measured
+ * (semi-axes 2*sqrt(lambda), pixel variance 1/12 included, lambda2 floored at 1/12) and
+ * aspect_ratio = major / minor. The detector columns are untouched for max_radius + legacy.
+ * Otherwise long_axis is the max radius (max_radius) or the measured major axis (moments);
+ * short_axis stays surface / (pi * long_axis) for every axis method.
+ * volume_model: 'legacy' (pi b^2 a), 'spheroid' (4/3 pi a b^2) or 'ellipsoid' (measured
+ * aspect ratio, area-normalised: B = sqrt(S / (pi * AR)), V = 4/3 * S * B, thickness = width).
  */
 export function remeasureClusters(ds, axisMethod, volumeModel) {
   const n = ds.n
-  if (n === 0 || (axisMethod === 'max_radius' && volumeModel === 'legacy')) return
-  const longAxes = new Float64Array(n)
-  if (axisMethod === 'moments') {
-    const { px_row, px_col, px_start, px_len } = ds
-    for (let k = 0; k < n; k++) {
-      const s = px_start[k]
-      const e = s + px_len[k]
-      const cnt = px_len[k]
-      let sx = 0.0
-      let sy = 0.0
-      for (let i = s; i < e; i++) {
-        sx += px_row[i]
-        sy += px_col[i]
-      }
-      const mx = sx / cnt
-      const my = sy / cnt
-      let axx = 0.0
-      let ayy = 0.0
-      let axy = 0.0
-      for (let i = s; i < e; i++) {
-        const dx = px_row[i] - mx
-        const dy = px_col[i] - my
-        axx += dx * dx
-        ayy += dy * dy
-        axy += dx * dy
-      }
-      const sxx = axx / cnt + 1.0 / 12.0
-      const syy = ayy / cnt + 1.0 / 12.0
-      const sxy = axy / cnt
-      const halfTrace = 0.5 * (sxx + syy)
-      const dd = sxx - syy
-      const lam1 = halfTrace + Math.sqrt(Math.max(0.25 * (dd * dd) + sxy * sxy, 0.0))
-      longAxes[k] = 2.0 * Math.sqrt(lam1)
+  if (n === 0) return
+  const major = new Float64Array(n)
+  const minor = new Float64Array(n)
+  const aspect = new Float64Array(n)
+  const { px_row, px_col, px_start, px_len } = ds
+  for (let k = 0; k < n; k++) {
+    const s = px_start[k]
+    const e = s + px_len[k]
+    const cnt = px_len[k]
+    if (cnt === 0) {
+      major[k] = NaN
+      minor[k] = NaN
+      aspect[k] = NaN
+      continue
     }
-  } else {
-    longAxes.set(ds.long_axis)
+    let sx = 0.0
+    let sy = 0.0
+    for (let i = s; i < e; i++) {
+      sx += px_row[i]
+      sy += px_col[i]
+    }
+    const mx = sx / cnt
+    const my = sy / cnt
+    let axx = 0.0
+    let ayy = 0.0
+    let axy = 0.0
+    for (let i = s; i < e; i++) {
+      const dx = px_row[i] - mx
+      const dy = px_col[i] - my
+      axx += dx * dx
+      ayy += dy * dy
+      axy += dx * dy
+    }
+    const sxx = axx / cnt + 1.0 / 12.0
+    const syy = ayy / cnt + 1.0 / 12.0
+    const sxy = axy / cnt
+    const halfTrace = 0.5 * (sxx + syy)
+    const dd = sxx - syy
+    const root = Math.sqrt(Math.max(0.25 * (dd * dd) + sxy * sxy, 0.0))
+    const lam1 = halfTrace + root
+    const lam2 = Math.max(halfTrace - root, 1.0 / 12.0)
+    major[k] = 2.0 * Math.sqrt(lam1)
+    minor[k] = 2.0 * Math.sqrt(lam2)
+    aspect[k] = major[k] / minor[k]
   }
+  ds.major_axis_measured = major
+  ds.minor_axis_measured = minor
+  ds.aspect_ratio = aspect
+  if (axisMethod === 'max_radius' && volumeModel === 'legacy') return // default: nothing else changes
+  const longAxes = axisMethod === 'moments' ? major : Float64Array.from(ds.long_axis)
   for (let k = 0; k < n; k++) {
     const longAxis = longAxes[k]
     const surface = ds.surface[k]
@@ -353,6 +381,9 @@ export function remeasureClusters(ds, axisMethod, volumeModel) {
     }
     if (volumeModel === 'spheroid') {
       ds.volume[k] = (((4.0 / 3.0) * Math.PI) * longAxis) * pow2(shortAxis)
+    } else if (volumeModel === 'ellipsoid') {
+      const B = Math.sqrt(surface / (Math.PI * aspect[k]))
+      ds.volume[k] = ((4.0 / 3.0) * surface) * B
     } else {
       ds.volume[k] = (Math.PI * pow2(shortAxis)) * longAxis
     }
