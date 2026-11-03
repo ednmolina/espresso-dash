@@ -3,7 +3,7 @@
 //   E2E_CLOUD=1 PYTHON=/path/to/venv/bin/python npx playwright test -c e2e/playwright.config.js cloud
 import { test, expect } from '@playwright/test'
 import {
-  openAnalyzer, uploadFixture, setScale, detect, clickImage, particleCount, trackErrors, GRID,
+  openAnalyzer, uploadFixture, setScaleAndArea, detect, clickImage, particleCount, trackErrors, GRID,
 } from './helpers.js'
 
 test.skip(process.env.E2E_CLOUD !== '1', 'set E2E_CLOUD=1 to run against the Python backend')
@@ -12,7 +12,7 @@ test('cloud engine: upload, scale, detect, histogram, erase, save, compare', asy
   const errors = trackErrors(page)
   await openAnalyzer(page, '?engine=cloud')
   await uploadFixture(page)
-  await setScale(page)
+  await setScaleAndArea(page)
 
   const body = await detect(page)
   expect(body.nclusters).toBeGreaterThan(10)
@@ -20,7 +20,7 @@ test('cloud engine: upload, scale, detect, histogram, erase, save, compare', asy
   await expect(page.locator('.histogram-chart svg').first()).toBeVisible({ timeout: 15_000 })
 
   const before = await particleCount(page)
-  await page.keyboard.press('4')
+  await page.keyboard.press('5')
   await clickImage(page, GRID.xs[2], GRID.ys[1])
   const erase = page.waitForResponse((r) => r.url().includes('/erase'))
   await page.keyboard.press('Enter')

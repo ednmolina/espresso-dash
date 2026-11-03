@@ -1,11 +1,11 @@
 import { test, expect } from '@playwright/test'
-import { openAnalyzer, uploadFixture, setScale, detect, gotoWorkspace, showAllPoints, trackErrors, openHarness } from './helpers.js'
+import { openAnalyzer, uploadFixture, setScaleAndArea, detect, gotoWorkspace, showAllPoints, trackErrors, openHarness } from './helpers.js'
 
 const HIDDEN_KEY = 'espressoLab.analyzer.resultsHidden.v1'
 
 async function analyze(page) {
   await uploadFixture(page)
-  await setScale(page)
+  await setScaleAndArea(page)
   await detect(page)
 }
 

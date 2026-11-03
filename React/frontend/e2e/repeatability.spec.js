@@ -2,7 +2,7 @@
 // The detection is run on-device (default engine); the maths is client-side, so ?engine=cloud behaves the same.
 import { test, expect } from '@playwright/test'
 import {
-  openAnalyzer, uploadFixture, setScale, detect, engineLogLength, waitForEngineOp, showResults, trackErrors,
+  openAnalyzer, uploadFixture, setScaleAndArea, detect, engineLogLength, waitForEngineOp, showResults, trackErrors,
   horizontalOverflow, TOUCHING_FIXTURE,
 } from './helpers.js'
 
@@ -38,7 +38,7 @@ for (const size of SIZES) {
       const errors = trackErrors(page)
       await openAnalyzer(page)
       await uploadFixture(page)
-      await setScale(page)
+      await setScaleAndArea(page)
       await detect(page)
 
       const save = page.getByRole('button', { name: /^save run/i })
@@ -127,7 +127,7 @@ test.describe('repeat check limits', () => {
   test('Save run stops at 5 and identical readings show no spread', async ({ page }) => {
     await openAnalyzer(page)
     await uploadFixture(page)
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
     const save = page.getByRole('button', { name: /^save run/i })
     await save.click()
@@ -170,7 +170,7 @@ test.describe('repeat check on different samples', () => {
   test('a big Dv50 spread warns that the photos look like different samples; same-sample runs do not', async ({ page }) => {
     await openAnalyzer(page)
     await uploadFixture(page)
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
     const save = page.getByRole('button', { name: /^save run/i })
     await save.click()
@@ -182,7 +182,7 @@ test.describe('repeat check on different samples', () => {
 
     // a different grind photographed
     await uploadFixture(page, TOUCHING_FIXTURE)
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
     await save.click()
     await expect(save).toHaveText('Save run (3/5)')

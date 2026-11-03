@@ -64,9 +64,10 @@ test('12 MP photo: upload to results', async ({ page }) => {
     await page.mouse.click(p.x, p.y)
   }
 
+  // The second tap opens the Area step; "Use whole photo" is what starts the detection
   const from = await engineLogLength(page)
   const tDetect = Date.now()
-  await page.keyboard.press('Enter')
+  await page.getByTestId('whole-photo').click()
   const entry = await waitForEngineOp(page, 'analyze', from, { timeout: 150_000 })
   await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 60_000 })
   const detectMs = Date.now() - tDetect

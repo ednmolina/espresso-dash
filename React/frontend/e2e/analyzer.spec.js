@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test'
 import {
-  openAnalyzer, uploadFixture, setScale, detect, clickImage, imageToPage,
+  openAnalyzer, uploadFixture, setScale, setScaleAndArea, useWholePhoto, detect, clickImage, imageToPage,
   particleCount, trackErrors, GRID, engineLogLength, waitForEngineOp, waitForAutoDetect,
 } from './helpers.js'
 
@@ -9,7 +9,7 @@ test.describe('analyzer workflow', () => {
     const errors = trackErrors(page)
     await openAnalyzer(page)
     await uploadFixture(page)
-    await setScale(page)
+    await setScaleAndArea(page)
 
     const body = await detect(page)
     expect(body.nclusters).toBeGreaterThan(10)
@@ -20,7 +20,7 @@ test.describe('analyzer workflow', () => {
 
     // erase the particle at the grid centre
     const before = await particleCount(page)
-    await page.keyboard.press('4')
+    await page.keyboard.press('5')
     await clickImage(page, GRID.xs[2], GRID.ys[1])
     const from = await engineLogLength(page)
     await page.keyboard.press('Enter')
@@ -46,7 +46,7 @@ test.describe('analyzer workflow', () => {
     expect(errors).toEqual([])
   })
 
-  test('Threshold is unavailable until the scale is set, then detects by itself', async ({ page }) => {
+  test('Threshold is unavailable until the scale and the area are set, then detects by itself', async ({ page }) => {
     await openAnalyzer(page)
     await uploadFixture(page)
     const thresholdStep = page.locator('.step[data-step=threshold]')
@@ -56,6 +56,11 @@ test.describe('analyzer workflow', () => {
     await page.waitForTimeout(300)
     expect(await engineLogLength(page)).toBe(from)
     await setScale(page)
+    await page.keyboard.press('Enter') // scale but no area: still refused
+    await page.waitForTimeout(300)
+    expect(await engineLogLength(page)).toBe(from)
+    await expect(thresholdStep).toBeDisabled()
+    await useWholePhoto(page)
     await waitForAutoDetect(page, from)
     await expect(thresholdStep).toHaveAttribute('aria-current', 'step')
   })
@@ -65,10 +70,10 @@ test.describe('analyzer UI acceptance', () => {
   test('no horizontal overflow, toolbar stays on one row', async ({ page }) => {
     await openAnalyzer(page)
     await uploadFixture(page)
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
     // Threshold is a taller card by design (steps, then the control); Clean up keeps the one-row toolbar.
-    for (const step of ['3', '4']) {
+    for (const step of ['4', '5']) {
       await page.keyboard.press(step)
       for (const [w, h] of [[1440, 900], [1280, 800], [1024, 768], [390, 844]]) {
         await page.setViewportSize({ width: w, height: h })
@@ -84,7 +89,7 @@ test.describe('analyzer UI acceptance', () => {
           return bad
         })
         expect(overflow, `overflow at ${w}px, step ${step}`).toEqual([])
-        if (w >= 1280 && step === '4') {
+        if (w >= 1280 && step === '5') {
           const tb = await page.evaluate(() => {
             const t = document.querySelector('.toolbar')
             const tops = [...t.children].map((c) => c.offsetTop)
@@ -100,7 +105,7 @@ test.describe('analyzer UI acceptance', () => {
   test('overlay toggle lives on the canvas as a radiogroup', async ({ page }) => {
     await openAnalyzer(page)
     await uploadFixture(page)
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
     await expect(page.locator('.canvas-area .overlay-btns[role=radiogroup]')).toBeVisible()
   })
@@ -108,7 +113,7 @@ test.describe('analyzer UI acceptance', () => {
   test('stepper states are exclusive and disabled buttons look disabled', async ({ page }) => {
     await openAnalyzer(page)
     await uploadFixture(page)
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
     await page.keyboard.press('2')
     await expect(page.locator('.step[aria-current="step"]')).toHaveCount(1)
@@ -118,7 +123,7 @@ test.describe('analyzer UI acceptance', () => {
     const bg = await thresholdStep.evaluate((el) => getComputedStyle(el).backgroundColor)
     expect(bg).not.toBe('rgb(212, 135, 74)')
 
-    await page.keyboard.press('4')
+    await page.keyboard.press('5')
     const primary = page.locator('.btn-primary:disabled').first()
     await expect(primary).toBeVisible()
     const style = await primary.evaluate((el) => {
@@ -183,7 +188,7 @@ test.describe('analyzer UI acceptance', () => {
   test('busy state while detecting', async ({ page }) => {
     await openAnalyzer(page, '?engineDelay=1200')
     await uploadFixture(page)
-    await setScale(page) // Threshold detects on its own
+    await setScaleAndArea(page) // Use whole photo: Threshold detects on its own
     await expect(page.locator('.canvas-area[aria-busy="true"]')).toBeVisible()
     await expect(page.locator('.canvas-area').getByText(/Detecting particles/)).toBeVisible()
     await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 30_000 })
@@ -193,7 +198,7 @@ test.describe('analyzer UI acceptance', () => {
   test('sliders have a fill, steps show focus, hints are readable', async ({ page }) => {
     await openAnalyzer(page)
     await uploadFixture(page)
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
 
     const ranges = await page.locator('input[type=range]').evaluateAll((els) => els.map((e) => e.style.getPropertyValue('--fill')))
