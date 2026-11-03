@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import {
   openAnalyzer, uploadFixture, setScale, detect, clickImage, imageToPage,
-  particleCount, trackErrors, GRID,
+  particleCount, trackErrors, GRID, engineLogLength, waitForEngineOp,
 } from './helpers.js'
 
 test.describe('analyzer workflow', () => {
@@ -22,9 +22,9 @@ test.describe('analyzer workflow', () => {
     const before = await particleCount(page)
     await page.keyboard.press('4')
     await clickImage(page, GRID.xs[2], GRID.ys[1])
-    const erase = page.waitForResponse((r) => r.url().includes('/erase'))
+    const from = await engineLogLength(page)
     await page.keyboard.press('Enter')
-    expect((await erase).status()).toBe(200)
+    await waitForEngineOp(page, 'erase', from)
     await expect.poll(() => particleCount(page)).toBeLessThan(before)
 
     // save two runs and compare
@@ -161,13 +161,9 @@ test.describe('analyzer UI acceptance', () => {
   })
 
   test('busy state while detecting', async ({ page }) => {
-    await openAnalyzer(page)
+    await openAnalyzer(page, '?engineDelay=1200')
     await uploadFixture(page)
     await setScale(page)
-    await page.route('**/analyze', async (route) => {
-      await new Promise((r) => setTimeout(r, 1200))
-      await route.continue()
-    })
     await page.keyboard.press('Enter')
     await expect(page.locator('.canvas-area[aria-busy="true"]')).toBeVisible()
     await expect(page.locator('.canvas-area').getByText(/Detecting particles/)).toBeVisible()

@@ -1,5 +1,6 @@
 // The frontend must keep working against the previous analyzer backend (main @ e299811), which
 // has no Dv10/Dv50/Dv90, no layer images, no /preview and no /health, and returns the histogram as a PNG.
+// That path is only used with ?engine=cloud (the default engine runs on the device).
 import { test, expect } from '@playwright/test'
 import {
   openAnalyzer, uploadFixture, setScale, detect, clickImage, particleCount, trackErrors, GRID,
@@ -12,7 +13,7 @@ const paths = (calls) => calls.map((c) => c.path)
 
 async function analyzeWithStub(page, opts) {
   const api = await installOldApi(page, opts)
-  await openAnalyzer(page)
+  await openAnalyzer(page, '?engine=cloud')
   await uploadFixture(page)
   await setScale(page)
   await detect(page)

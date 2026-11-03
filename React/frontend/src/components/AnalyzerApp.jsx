@@ -1,13 +1,14 @@
-import { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import ImageCanvas from './ImageCanvas'
 import Sidebar from './Sidebar'
 import ResultsPanel, { DistributionPanel, headlineOf } from './ResultsPanel'
 import HistogramChart, { SERIES_COLORS } from './HistogramChart'
 import GrindSettingPicker from './pages/GrindSettingPicker'
 import { Sheet, useBreakpoint } from './shell'
-import { API, DEFAULT_SETTINGS, REFERENCE_OBJECTS, settingsPayload } from '../constants'
+import { DEFAULT_SETTINGS, REFERENCE_OBJECTS, settingsPayload } from '../constants'
+import { createAnalyzerClient, disposeLocalEngine } from '../analysis/analyzerClient'
 import {
-  errorMessage, particlesToCsv,
+  particlesToCsv,
   isNum, um, cleanUnit, formatSigma, sig,
 } from '../analyzerUtils'
 import { histogramKind, layerOf, mergeErase, normalizeSummary, previewSrc } from '../analyzerCompat'
@@ -66,50 +67,19 @@ function isInteractiveTarget(target) {
   return ['TEXTAREA', 'SELECT'].includes(target.tagName)
 }
 
-function UploadActions({ onUpload, large = false }) {
+function UploadActions({ onUpload, large = false, disabled = false }) {
   return (
     <div className={`upload-actions ${large ? 'large' : ''}`}>
-      <label className={`upload-btn ${large ? 'large primary' : ''}`}>
+      <label className={`upload-btn ${large ? 'large primary' : ''}`} aria-disabled={disabled || undefined}>
         Choose image
-        <input type="file" accept="image/*" onChange={onUpload} hidden />
+        <input type="file" accept="image/*" onChange={onUpload} disabled={disabled} hidden />
       </label>
-      <label className={`upload-btn upload-btn-secondary ${large ? 'large' : ''}`}>
+      <label className={`upload-btn upload-btn-secondary ${large ? 'large' : ''}`} aria-disabled={disabled || undefined}>
         Take photo
-        <input type="file" accept="image/*" capture="environment" onChange={onUpload} hidden />
+        <input type="file" accept="image/*" capture="environment" onChange={onUpload} disabled={disabled} hidden />
       </label>
     </div>
   )
-}
-
-async function authHeaders(user) {
-  if (!user) return {}
-  try {
-    const token = await user.getIdToken()
-    return { Authorization: `Bearer ${token}` }
-  } catch {
-    return {}
-  }
-}
-
-/** fetch + JSON with the server's error detail surfaced as the thrown message. */
-async function apiRequest(user, path, { json, form, method = 'POST' } = {}) {
-  const headers = { ...await authHeaders(user) }
-  if (json) headers['Content-Type'] = 'application/json'
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers,
-    body: json ? JSON.stringify(json) : form,
-  })
-  let data = null
-  try {
-    data = await res.json()
-  } catch {
-    // non-JSON error page
-  }
-  if (!res.ok) {
-    throw new Error(errorMessage(data, res.status))
-  }
-  return data
 }
 
 /** Natural size of an image the browser can decode itself, or null. */
@@ -153,6 +123,19 @@ function RulerIcon() {
   )
 }
 
+// Where each phase of the on-device engine sits on the busy card's progress bar.
+const PHASE_RANGE = {
+  decode: [0, 1],
+  resize: [0, 0.1],
+  flatten: [0.1, 0.2],
+  prelim: [0.2, 0.4],
+  detect: [0.4, 0.85],
+  measure: [0.85, 0.93],
+  layers: [0.93, 1],
+}
+
+const isImageLayer = (l) => l != null && typeof l === 'object' && typeof l.close === 'function'
+
 export default function AnalyzerApp({ user }) {
   const [imageId, setImageId] = useState(null)
   const [imageSrc, setImageSrc] = useState(null)
@@ -180,6 +163,10 @@ export default function AnalyzerApp({ user }) {
   const [busy, setBusy] = useState(false)
   const [busyLabel, setBusyLabel] = useState('Working…')
   const [elapsed, setElapsed] = useState(0)
+  const [progress, setProgress] = useState(0)
+  const phaseRanges = useRef(PHASE_RANGE) // progress ranges of the current busy period
+  const uploadSeq = useRef(0) // newest upload; older completions are ignored
+  const cancelLostRuns = useRef(false) // the last cancel dropped the engine's stored analyses
   const [kbdOpen, setKbdOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [grindSetting, setGrindSetting] = useState('')
@@ -196,6 +183,13 @@ export default function AnalyzerApp({ user }) {
   const settingsButtonRef = useRef(null)
   const cardRef = useRef(null)
   const dragRef = useRef(null)
+  const layerRefs = useRef(new Set())
+
+  // One swap point: the on-device engine by default, Cloud Run with ?engine=cloud.
+  const userRef = useRef(user)
+  userRef.current = user
+  const client = useMemo(() => createAnalyzerClient({ getUser: () => userRef.current }), [])
+  const isLocal = client.mode === 'local'
 
   const isPhone = useBreakpoint() === 'phone'
   const { go } = useNav()
@@ -204,7 +198,9 @@ export default function AnalyzerApp({ user }) {
 
   const say = (text, tone = 'info') => setStatus({ text, tone })
 
-  const layerB64 = overlayMode === 'original' ? null : layerOf(analysisResult, overlayMode)
+  const layer = overlayMode === 'original' ? null : layerOf(analysisResult, overlayMode)
+  const layerB64 = typeof layer === 'string' ? layer : null
+  const layerImage = layer != null && typeof layer !== 'string' ? layer : null
   const summary = analysisResult?.summary ?? null
   const nsum = normalizeSummary(summary)
 
@@ -227,6 +223,33 @@ export default function AnalyzerApp({ user }) {
   }, [])
 
   useEffect(() => { writeHidden(resultsHidden) }, [resultsHidden])
+
+  // Progress from the on-device engine, as one monotonic 0..1 value per busy period.
+  useEffect(() => client.onProgress(({ phase, fraction }) => {
+    const [lo, hi] = phaseRanges.current[phase] ?? [0, 1]
+    const v = lo + (hi - lo) * Math.max(0, Math.min(1, fraction ?? 0))
+    setProgress((prev) => Math.max(prev, v))
+  }), [client])
+
+  // Leaving the analyzer frees the worker, the decoded photo and the stored results.
+  useEffect(() => () => { if (isLocal) disposeLocalEngine() }, [isLocal])
+
+  // Replaced ImageBitmap layers are closed (not those the new result still uses).
+  useEffect(() => {
+    const current = new Set()
+    for (const key of ['threshold_layer', 'cluster_layer']) {
+      const l = analysisResult?.[key]
+      if (isImageLayer(l)) current.add(l)
+    }
+    for (const old of layerRefs.current) {
+      if (!current.has(old)) { try { old.close() } catch { /* already closed */ } }
+    }
+    layerRefs.current = current
+  }, [analysisResult])
+  useEffect(() => () => {
+    for (const l of layerRefs.current) { try { l.close() } catch { /* already closed */ } }
+    layerRefs.current = new Set()
+  }, [])
 
   // On a phone the analyzer fills the screen between the top bar and the tab bar.
   useLayoutEffect(() => {
@@ -261,16 +284,45 @@ export default function AnalyzerApp({ user }) {
     return () => clearInterval(id)
   }, [busy])
 
-  const startBusy = (label) => { setBusyLabel(label); setBusy(true) }
+  const startBusy = (label) => {
+    // Detecting may first re-decode the photo (after a cancel), so decode only fills the
+    // first tenth of the bar there instead of running it to 100% before detection starts.
+    cancelLostRuns.current = false
+    phaseRanges.current = label.startsWith('Detecting') ? { ...PHASE_RANGE, decode: [0, 0.1] } : PHASE_RANGE
+    setBusyLabel(label); setProgress(0); setBusy(true)
+  }
+
+  // Cancel terminates the on-device worker, and the analyses stored in it die with it.
+  const cancelBusy = () => {
+    const lost = client.cancel()
+    if (lost && savedRuns.length > 0) {
+      cancelLostRuns.current = true
+      setSavedRuns([])
+      setCompare(null)
+    }
+  }
+  // Status text for a cancelled operation; says so when the saved runs went with it.
+  const sayCancelled = (text) => {
+    if (cancelLostRuns.current) {
+      cancelLostRuns.current = false
+      say('Cancelled — saved runs were cleared; re-run to compare.')
+    } else say(text)
+  }
+  const wasCancelled = (err) => err?.status === 499
+  // After a cancel the on-device results are gone; say what to do instead of a bare 404.
+  const withHint = (err) => (isLocal && err?.status === 404 ? `${err.message} Run detection again.` : err.message)
 
   const handleUpload = async (e) => {
     const input = e.target
     const file = input.files[0]
     if (!file) return
     input.value = ''
+    if (busy) return // uploads are serialised against running operations
+    const seq = ++uploadSeq.current
 
-    startBusy('Uploading…')
-    say('Uploading…')
+    const loadingText = isLocal ? 'Loading photo…' : 'Uploading…'
+    startBusy(loadingText)
+    say(loadingText)
 
     const form = new FormData()
     form.append('file', file)
@@ -283,18 +335,26 @@ export default function AnalyzerApp({ user }) {
       // Older servers already return the image in the upload response, so
       // /preview is only called when that is missing.
       const localUrl = URL.createObjectURL(file)
+      const probe = probeImage(localUrl)
       const [data, local] = await Promise.all([
-        apiRequest(user, '/upload', { form }),
-        probeImage(localUrl),
+        // `expect`: the on-device engine compares its decode with what the browser shows
+        // (EXIF rotation) and redoes the decode when they disagree; the cloud path ignores it.
+        client.request('/upload', { form, expect: probe }),
+        probe,
       ])
       let src = localUrl
       if (!local || local.width !== data.width || local.height !== data.height) {
         URL.revokeObjectURL(localUrl)
         src = previewSrc(data)
         if (!src) {
-          const preview = await apiRequest(user, `/preview/${data.image_id}`, { method: 'GET' })
+          const preview = await client.request(`/preview/${data.image_id}`, { method: 'GET' })
           src = `data:${preview.image_mime};base64,${preview.image_b64}`
         }
+      }
+      if (seq !== uploadSeq.current) {
+        // a newer upload started while this one was decoding: keep the newer photo
+        if (src.startsWith('blob:')) URL.revokeObjectURL(src)
+        return
       }
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
       objectUrlRef.current = src.startsWith('blob:') ? src : null
@@ -315,9 +375,11 @@ export default function AnalyzerApp({ user }) {
       setMode('reference')
       say('Click one edge of your reference coin to set the scale.')
     } catch (err) {
-      say(`Upload failed: ${err.message}`, 'error')
+      if (seq !== uploadSeq.current) return
+      if (wasCancelled(err)) sayCancelled('Cancelled.')
+      else say(`${isLocal ? 'Could not load the photo' : 'Upload failed'}: ${err.message}`, 'error')
     } finally {
-      setBusy(false)
+      if (seq === uploadSeq.current) setBusy(false)
     }
   }
 
@@ -381,16 +443,16 @@ export default function AnalyzerApp({ user }) {
     const seq = ++histSeq.current
     setHistogramLoading(true)
     try {
-      const data = await apiRequest(user, '/histogram', {
+      const data = await client.request('/histogram', {
         json: { image_id: imageId, removed_cluster_ids: ids, include_png: false, weight_mode: weight },
       })
       if (seq === histSeq.current) setHistogram(data)
     } catch (err) {
-      if (seq === histSeq.current) say(`Histogram failed: ${err.message}`, 'error')
+      if (seq === histSeq.current) say(`Histogram failed: ${withHint(err)}`, 'error')
     } finally {
       if (seq === histSeq.current) setHistogramLoading(false)
     }
-  }, [imageId, user])
+  }, [imageId, client, isLocal])
 
   const changeWeight = (weight) => {
     if (weight === histWeight) return
@@ -408,7 +470,7 @@ export default function AnalyzerApp({ user }) {
     const started = performance.now()
 
     try {
-      const data = await apiRequest(user, '/analyze', {
+      const data = await client.request('/analyze', {
         json: {
           image_id: imageId,
           ...settingsPayload(settings),
@@ -429,11 +491,12 @@ export default function AnalyzerApp({ user }) {
       say(`${(data.nclusters ?? 0).toLocaleString()} particles detected in ${secs}s. Click stray clusters to remove them.`, 'success')
       if (data.summary) loadHistogram([], histWeight)
     } catch (err) {
-      say(`Detection failed: ${err.message}. Try lowering Threshold or Analysis resolution.`, 'error')
+      if (wasCancelled(err)) sayCancelled('Detection cancelled.')
+      else say(`Detection failed: ${err.message}. Try lowering Threshold or Analysis resolution.`, 'error')
     } finally {
       setBusy(false)
     }
-  }, [imageId, busy, canDetect, settings, referencePoints, referencePhysicalMm, polygonPoints, user, loadHistogram, histWeight])
+  }, [imageId, busy, canDetect, settings, referencePoints, referencePhysicalMm, polygonPoints, client, loadHistogram, histWeight])
 
   const applyErase = useCallback(async () => {
     if (!imageId || !erasePoints.length) return
@@ -441,7 +504,7 @@ export default function AnalyzerApp({ user }) {
     say('Removing clusters…')
 
     try {
-      const data = await apiRequest(user, '/erase', {
+      const data = await client.request('/erase', {
         json: {
           image_id: imageId,
           erase_points: erasePoints.map((point) => [point.x, point.y]),
@@ -459,11 +522,12 @@ export default function AnalyzerApp({ user }) {
       say(added > 0 ? `${added} cluster${added === 1 ? '' : 's'} removed (${gone.length} in total).` : 'No clusters under the brush.', added > 0 ? 'success' : 'info')
       if ((data.summary ?? analysisResult?.summary)) loadHistogram(gone, histWeight)
     } catch (err) {
-      say(`Erase failed: ${err.message}`, 'error')
+      if (wasCancelled(err)) sayCancelled('Cancelled.')
+      else say(`Erase failed: ${withHint(err)}`, 'error')
     } finally {
       setBusy(false)
     }
-  }, [imageId, erasePoints, eraseRadius, removedIds, user, loadHistogram, analysisResult, histWeight])
+  }, [imageId, erasePoints, eraseRadius, removedIds, client, isLocal, loadHistogram, analysisResult, histWeight])
 
   const saveRun = () => {
     if (!analysisResult || !imageId) return
@@ -516,9 +580,10 @@ export default function AnalyzerApp({ user }) {
     if (savedRuns.length < 2) return
     startBusy('Comparing runs…')
     try {
-      setCompare(await apiRequest(user, '/histogram/compare', { json: compareBody(false) }))
+      setCompare(await client.request('/histogram/compare', { json: compareBody(false) }))
     } catch (err) {
-      say(`Compare failed: ${err.message}`, 'error')
+      if (wasCancelled(err)) sayCancelled('Cancelled.')
+      else say(`Compare failed: ${withHint(err)}`, 'error')
     } finally {
       setBusy(false)
     }
@@ -538,12 +603,13 @@ export default function AnalyzerApp({ user }) {
   const downloadHistogram = async () => {
     startBusy('Rendering chart…')
     try {
-      const data = await apiRequest(user, '/histogram', {
+      const data = await client.request('/histogram', {
         json: { image_id: imageId, removed_cluster_ids: removedIds, include_png: true, weight_mode: histWeight },
       })
       downloadDataUrl(`data:image/png;base64,${data.histogram_b64}`, 'particle-histogram.png')
     } catch (err) {
-      say(`Download failed: ${err.message}`, 'error')
+      if (wasCancelled(err)) sayCancelled('Cancelled.')
+      else say(`Download failed: ${err.message}`, 'error')
     } finally {
       setBusy(false)
       setDownloadsOpen(false)
@@ -553,10 +619,11 @@ export default function AnalyzerApp({ user }) {
   const downloadCompare = async () => {
     startBusy('Rendering chart…')
     try {
-      const data = await apiRequest(user, '/histogram/compare', { json: compareBody(true) })
+      const data = await client.request('/histogram/compare', { json: compareBody(true) })
       downloadDataUrl(`data:image/png;base64,${data.histogram_b64}`, 'run-comparison.png')
     } catch (err) {
-      say(`Download failed: ${err.message}`, 'error')
+      if (wasCancelled(err)) sayCancelled('Cancelled.')
+      else say(`Download failed: ${err.message}`, 'error')
     } finally {
       setBusy(false)
     }
@@ -1065,7 +1132,7 @@ export default function AnalyzerApp({ user }) {
       <header className="analyzer-head">
         <h1>Grind Analyzer</h1>
         <div className="analyzer-head-actions">
-          {imageSrc && !isPhone && <UploadActions onUpload={handleUpload} />}
+          {imageSrc && !isPhone && <UploadActions onUpload={handleUpload} disabled={busy} />}
           <div className="settings-wrap" ref={settingsWrapRef}>
             <button
               type="button"
@@ -1106,7 +1173,7 @@ export default function AnalyzerApp({ user }) {
             {imageSrc && (
               <div className="settings-photo">
                 <span className="settings-photo-label">Photo</span>
-                <UploadActions onUpload={handleUpload} />
+                <UploadActions onUpload={handleUpload} disabled={busy} />
               </div>
             )}
             {settingsContent}
@@ -1230,6 +1297,7 @@ export default function AnalyzerApp({ user }) {
             eraseRadius={eraseRadius}
             onPointAdded={handlePointAdded}
             layerB64={layerB64}
+            layerImage={layerImage}
             pixelScale={pixelScale}
             referenceMm={referencePhysicalMm}
             onEraseRadiusChange={setEraseRadius}
@@ -1244,7 +1312,7 @@ export default function AnalyzerApp({ user }) {
             <p>
               Spread a pinch of coffee thinly on white paper, place a coin beside it, and shoot straight down in even light.
             </p>
-            <UploadActions onUpload={handleUpload} large />
+            <UploadActions onUpload={handleUpload} large disabled={busy} />
           </div>
         )}
 
@@ -1280,8 +1348,24 @@ export default function AnalyzerApp({ user }) {
           <div className="canvas-scrim">
             <div className="busy-card" role="status">
               <div className="busy-title"><span className="spinner" aria-hidden="true" />{busyLabel}</div>
-              <div className="busy-bar" aria-hidden="true"><i /></div>
-              <div className="busy-elapsed">{elapsed.toFixed(1)} s</div>
+              {isLocal ? (
+                <div
+                  className="busy-progress"
+                  role="progressbar"
+                  aria-label={busyLabel}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(progress * 100)}
+                >
+                  <i style={{ width: `${Math.round(progress * 100)}%` }} />
+                </div>
+              ) : (
+                <div className="busy-bar" aria-hidden="true"><i /></div>
+              )}
+              <div className="busy-foot">
+                <div className="busy-elapsed">{elapsed.toFixed(1)} s</div>
+                {isLocal && <button type="button" className="ghost small busy-cancel" onClick={cancelBusy}>Cancel</button>}
+              </div>
             </div>
           </div>
         )}

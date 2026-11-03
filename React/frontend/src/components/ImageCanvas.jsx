@@ -20,6 +20,8 @@ const PINCH_MIN_DISTANCE = 8
  *   eraseRadius     – radius in original image pixels
  *   onPointAdded    – (x, y) => void  called with original-image coords on click
  *   layerB64        – optional transparent base64 PNG drawn over the image
+ *   layerImage      – optional CanvasImageSource (ImageBitmap/canvas) drawn like layerB64;
+ *                     the on-device engine passes this instead of a string
  *   pixelScale      – px per mm once the coin is measured (for the guide label)
  *   referenceMm     – physical size of the reference object
  *   onEraseRadiusChange – (r) => void  ([ and ] keys)
@@ -40,6 +42,7 @@ export default function ImageCanvas({
   eraseRadius = 20,
   onPointAdded,
   layerB64,
+  layerImage = null,
   pixelScale = null,
   referenceMm = 0,
   onEraseRadiusChange,
@@ -134,9 +137,14 @@ export default function ImageCanvas({
     }
     // Overlay layer: keep its pixels crisp when zoomed in.
     const layer = overlayImgRef.current
-    if (layer && layer.complete) {
+    // <img> has `complete`; ImageBitmap and <canvas> are ready as soon as they exist.
+    if (layer && layer.complete !== false) {
       ctx.imageSmoothingEnabled = false
-      ctx.drawImage(layer, 0, 0, imageWidth, imageHeight)
+      try {
+        ctx.drawImage(layer, 0, 0, imageWidth, imageHeight)
+      } catch {
+        // a closed ImageBitmap (replaced result): skip until the new layer is set
+      }
     }
 
     ctx.restore()
@@ -347,6 +355,11 @@ export default function ImageCanvas({
   }, [imageSrc, fitToCanvas])
 
   useEffect(() => {
+    if (layerImage) {
+      overlayImgRef.current = layerImage
+      forceRedraw(n => n + 1)
+      return
+    }
     if (!layerB64) {
       overlayImgRef.current = null
       forceRedraw(n => n + 1)
@@ -358,7 +371,7 @@ export default function ImageCanvas({
       forceRedraw(n => n + 1)
     }
     img.src = `data:image/png;base64,${layerB64}`
-  }, [layerB64])
+  }, [layerB64, layerImage])
 
   // Redraw whenever anything changes
   useEffect(() => {

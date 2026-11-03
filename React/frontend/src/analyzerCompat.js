@@ -12,11 +12,14 @@
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v)
 
-/** Base64 layer for the chosen overlay: new transparent layer first, old opaque composite as fallback. */
+/**
+ * Layer for the chosen overlay. Either a base64 string (cloud engine: transparent layer first,
+ * old opaque composite as fallback) or a drawable image (on-device engine: ImageBitmap/canvas).
+ */
 export function layerOf(result, mode /* 'clusters' | 'threshold' */) {
   if (!result) return null
-  if (mode === 'threshold') return result.threshold_layer_b64 ?? result.threshold_overlay_b64 ?? null
-  if (mode === 'clusters') return result.cluster_layer_b64 ?? result.cluster_overlay_b64 ?? null
+  if (mode === 'threshold') return result.threshold_layer ?? result.threshold_layer_b64 ?? result.threshold_overlay_b64 ?? null
+  if (mode === 'clusters') return result.cluster_layer ?? result.cluster_layer_b64 ?? result.cluster_overlay_b64 ?? null
   return null
 }
 
@@ -36,6 +39,7 @@ export function mergeErase(prev, data, removedIds) {
   }
   return {
     ...base,
+    cluster_layer: next.cluster_layer ?? base.cluster_layer,
     cluster_layer_b64: next.cluster_layer_b64 ?? next.cluster_overlay_b64 ?? base.cluster_layer_b64 ?? base.cluster_overlay_b64 ?? null,
     nclusters: next.nclusters ?? base.nclusters,
     summary: next.summary !== undefined ? next.summary : base.summary,
