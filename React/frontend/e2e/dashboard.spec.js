@@ -18,7 +18,7 @@ for (const size of SIZES) {
       await openHarness(page)
       await expect(page.locator('.dashboard-app')).toBeVisible({ timeout: 2000 })
       expect(Date.now() - t0).toBeLessThan(8000) // sanity bound including dev-server transform time
-      await expect(page.locator('.dashboard-metric-card').first()).toContainText('48')
+      await expect(page.locator('[data-testid=shots-count]')).toContainText('48')
       await expect(page.locator('[data-sync-state="offline"]')).toBeVisible({ timeout: 10_000 })
       await page.waitForTimeout(15_000)
       const n = await page.evaluate((k) => JSON.parse(localStorage.getItem(k)).shots.length, CACHE_KEY)
@@ -192,5 +192,58 @@ test.describe('dashboard desktop details', () => {
       ).length,
     )
     expect(broken).toBe(0)
+  })
+})
+
+test.describe('dashboard shots workflow @ 1440px', () => {
+  test.use({ viewport: { width: 1440, height: 900 } })
+
+  test('Origins: filters change the row count; map and legend render', async ({ page }) => {
+    const errors = trackErrors(page)
+    await openHarness(page)
+    await expect(page.locator('.dashboard-app')).toBeVisible()
+    await page.locator('[data-testid=tab-origins]').click()
+    await expect(page.locator('[data-testid=origins-map]')).toBeVisible()
+    await expect(page.locator('[data-testid=map-legend]')).toBeVisible()
+    await expect(page.locator('.dashboard-map-marker').first()).toBeVisible()
+
+    const rows = page.locator('[data-testid=table-origins-log] tbody tr')
+    await expect(rows).toHaveCount(48)
+    const filter = page.locator('[data-testid=filter-roaster]')
+    await filter.locator('.dashboard-chip-select-trigger').click()
+    await filter.locator('.dashboard-chip-select-option input[type=checkbox]').first().check()
+    await expect.poll(() => rows.count()).toBeLessThan(48)
+    expect(await rows.count()).toBeGreaterThan(0)
+    await expect(page.locator('[data-testid=table-origins-log]')).toContainText('of 48')
+    expect(errors.filter((e) => e.startsWith('pageerror'))).toEqual([])
+  })
+
+  test('Log a shot sheet opens with an empty pH that is never prefilled', async ({ page }) => {
+    await openHarness(page)
+    await expect(page.locator('.dashboard-app')).toBeVisible()
+    await page.locator('[data-testid=log-shot-open]').click()
+    await expect(page.locator('[role=dialog]')).toBeVisible()
+    await expect(page.locator('[data-testid=shot-form]')).toBeVisible()
+    await expect(page.locator('[data-testid=ph-input]')).toHaveValue('')
+    await expect(page.locator('[data-testid=ph-input]')).toHaveAttribute('placeholder', /5\.4/)
+    await page.keyboard.press('Escape')
+    await expect(page.locator('[role=dialog]')).toHaveCount(0)
+  })
+
+  test('pH coverage is shown against the total shot count', async ({ page }) => {
+    await openHarness(page)
+    await expect(page.locator('.dashboard-app')).toBeVisible()
+    const coverage = page.locator('[data-testid=ph-coverage]:visible').first()
+    await expect(coverage).toContainText('of 48')
+    await expect(coverage).toContainText('12') // 12 of the 48 seeded shots have a pH
+  })
+
+  test('Experiments tab no longer shows a made-up R² metric', async ({ page }) => {
+    await openHarness(page)
+    await expect(page.locator('.dashboard-app')).toBeVisible()
+    await page.locator('[data-testid=tab-experiments]').click()
+    await expect(page.locator('.dashboard-tab-panel').first()).toBeVisible()
+    await expect(page.getByText('Extraction R²')).toHaveCount(0)
+    await expect(page.getByText(/Typical miss/i).first()).toBeVisible()
   })
 })

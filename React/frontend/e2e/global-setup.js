@@ -1,7 +1,7 @@
 // Playwright's webServer `url` check accepts any status from 200 to 403, so a 404 on /health
 // would pass. Wait here until the backend really answers 200.
 export default async function globalSetup() {
-  const url = 'http://localhost:8000/health'
+  const url = `http://localhost:${process.env.E2E_BACKEND_PORT || 8000}/health`
   const deadline = Date.now() + 120_000
   let last = 'no response'
   while (Date.now() < deadline) {

@@ -4,8 +4,8 @@ import path from 'node:path'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const PYTHON = process.env.PYTHON || 'python3'
-const BACKEND_PORT = 8000
-const VITE_PORT = 5173
+const BACKEND_PORT = Number(process.env.E2E_BACKEND_PORT || 8000)
+const VITE_PORT = Number(process.env.E2E_VITE_PORT || 5173)
 
 export default defineConfig({
   testDir: here,

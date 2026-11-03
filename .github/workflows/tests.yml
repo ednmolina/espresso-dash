@@ -40,12 +40,18 @@ jobs:
         working-directory: React/frontend
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: React/frontend/package-lock.json
       - run: npm ci
+      - name: Protected files unchanged (Firebase config, map code, backend)
+        run: node scripts/check-protected.mjs
+      - name: Unit tests
+        run: npm run test:unit
       - name: Production build (dummy Firebase config)
         env:
           VITE_FIREBASE_API_KEY: ci-dummy

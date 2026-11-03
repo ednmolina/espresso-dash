@@ -42,7 +42,7 @@ export function normalizeParticles(particles) {
 export function filterParticles(particles, removedIds) {
   if (!particles || !removedIds?.length) return particles
   const gone = new Set(removedIds)
-  if (Array.isArray(particles)) return particles.filter((p) => !gone.has(p.id))
+  if (Array.isArray(particles)) return particles.filter((p) => !gone.has(p.id ?? p.ID))
   if (!Array.isArray(particles.id)) return particles
   const keep = []
   particles.id.forEach((id, i) => { if (!gone.has(id)) keep.push(i) })

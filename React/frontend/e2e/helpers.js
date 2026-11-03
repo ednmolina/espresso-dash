@@ -27,17 +27,47 @@ export function trackErrors(page) {
   return errors
 }
 
-export async function openHarness(page, query = '') {
+/**
+ * Opens the harness. `query` is a query string such as '?empty=1' or '?calib=1'; `hash` is a route
+ * such as '#/grinder'. See e2e/harness/main.jsx for the query params.
+ */
+export async function openHarness(page, query = '', hash = '') {
   // Firestore is never reachable in tests; fail fast so the app uses its cache.
   await page.route('**/firestore.googleapis.com/**', (r) => r.abort())
-  await page.goto(`${HARNESS}${query}`)
+  await page.goto(`${HARNESS}${query}${hash}`)
 }
 
-export async function openAnalyzer(page) {
-  await openHarness(page)
-  await page.getByRole('button', { name: 'Grind Analyzer' }).click()
-  await expect(page.locator('.analyzer-app')).toBeVisible()
+export const WORKSPACE_ROOTS = {
+  shots: '[data-testid=dashboard-app]',
+  analyzer: '.analyzer-app',
+  grinder: '[data-testid=grinder-page]',
+  forecast: '[data-testid=forecast-page]',
+  diagnostics: '[data-testid=diagnostics-page]',
 }
+
+/** Clicks the visible top-nav or phone tab-bar item for a workspace id and waits for its page root. */
+export async function gotoWorkspace(page, id) {
+  await page.locator(`[data-testid=nav-${id}]:visible, [data-testid=tabbar-${id}]:visible`).click()
+  await expect(page.locator(WORKSPACE_ROOTS[id]).first()).toBeVisible()
+}
+
+export async function openAnalyzer(page, query = '') {
+  await openHarness(page, query)
+  await gotoWorkspace(page, 'analyzer')
+}
+
+/** Expands the Grinder points table (it shows 12 rows until "Show all N points" is pressed). */
+export async function showAllPoints(page) {
+  const more = page.getByRole('button', { name: /^Show all \d+ points$/ })
+  if (await more.isVisible().catch(() => false)) await more.click()
+}
+
+/** Horizontal overflow of the document, in px (0 = none). */
+export function horizontalOverflow(page) {
+  return page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+}
+
+export const CALIBRATION_IMPORT = path.join(here, 'fixtures', 'calibration.json')
 
 export async function uploadFixture(page) {
   await page.locator('input[type=file]:not([capture])').first().setInputFiles(FIXTURE)

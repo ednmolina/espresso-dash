@@ -72,7 +72,11 @@ function HelpTip({ text, label }) {
   )
 }
 
-export default function Sidebar({ settings, onSettingsChange, referencePreset, onPresetChange, referencePhysicalMm, onPhysicalMmChange, open = false, onToggle }) {
+/**
+ * Analyzer settings. Rendered inside a popover (desktop/tablet) or a Sheet (phone);
+ * `onClose` adds a Done button, `showTitle={false}` drops the heading when the host supplies one.
+ */
+export default function Sidebar({ settings, onSettingsChange, referencePreset, onPresetChange, referencePhysicalMm, onPhysicalMmChange, onClose, showTitle = true }) {
   const set = (key) => (e) => {
     const val = e.target.type === 'checkbox' ? e.target.checked : parseFloat(e.target.value)
     onSettingsChange({ ...settings, [key]: val })
@@ -88,15 +92,14 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
   }
 
   return (
-    <aside className={`analyzer-sidebar ${open ? 'open' : ''}`} aria-label="Settings">
-      <button type="button" className="sidebar-rail-toggle" onClick={onToggle} aria-expanded={open} aria-controls="analyzer-settings-body">
-        <span aria-hidden="true">⚙</span><span className="rail-label">Settings</span>
-      </button>
+    <div className="analyzer-sidebar" aria-label="Analyzer settings">
       <div className="sidebar-body" id="analyzer-settings-body">
-      <div className="sidebar-title">
-        <h2>Settings</h2>
-        <p>Defaults work for most photos.</p>
-      </div>
+      {showTitle && (
+        <div className="sidebar-title">
+          <h2>Settings</h2>
+          <p>Defaults work for most photos.</p>
+        </div>
+      )}
       <h3>Detection</h3>
 
       <label>
@@ -311,7 +314,10 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
           onChange={(e) => onPhysicalMmChange(parseFloat(e.target.value))}
         />
       </label>
+      {onClose && (
+        <button type="button" className="btn-primary sidebar-done" onClick={onClose}>Done</button>
+      )}
       </div>
-    </aside>
+    </div>
   )
 }
