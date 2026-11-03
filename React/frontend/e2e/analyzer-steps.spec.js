@@ -193,7 +193,6 @@ for (const vp of VIEWPORTS) {
     })
 
     test('the threshold slider previews live, detects on release, and Auto restores the original', async ({ page }) => {
-      test.skip(vp.name !== 'desktop' && vp.name !== 'phone', 'covered at the other two widths')
       const errors = trackErrors(page)
       await openAnalyzer(page)
       await uploadFixture(page)
