@@ -122,6 +122,30 @@ export function normalizeShape(s) {
   }
 }
 
+/**
+ * Normalised view of the analyze `split_info` (present only when "Separate touching particles"
+ * was on). `pieces` is the number of particles the split clumps became; `before` is what the same
+ * photo reports without separation (null without a pixel scale). Values are analysis-time:
+ * a clean-up afterwards does not change them.
+ */
+export function normalizeSplit(info) {
+  if (!info || typeof info !== 'object') return null
+  const clustersSplit = isNum(info.clusters_split) ? info.clusters_split : 0
+  const added = isNum(info.pieces_added) ? info.pieces_added : 0
+  const u = info.unsplit && typeof info.unsplit === 'object' ? info.unsplit : null
+  const num = (v) => (isNum(v) ? v : null)
+  return {
+    clustersSplit,
+    pieces: clustersSplit + added,
+    before: u ? { count: num(u.cluster_count), dv10: num(u.dv10_mm), dv50: num(u.dv50_mm), dv90: num(u.dv90_mm) } : null,
+  }
+}
+
+/** Saved-run label as shown in the runs table: " · separated" when the run used separation. */
+export function savedRunLabel(run) {
+  return run?.summary?.split_touching === true ? `${run.label} · separated` : String(run?.label ?? '')
+}
+
 /** 'series' when the browser can draw the chart, 'png' for the old server-rendered image, else 'none'. */
 export function histogramKind(h) {
   if (h?.edges?.length && h?.series) return 'series'

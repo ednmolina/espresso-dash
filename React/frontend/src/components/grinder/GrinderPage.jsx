@@ -116,6 +116,11 @@ function SizeToSetting({ cal, metric, model, um, setUm }) {
 
 function sourceLabel(p) { return p.source === 'photo' ? 'Analyzer photo' : 'Shot log' }
 
+/** "separated" tag for photo points saved while "Separate touching particles" was on. */
+function SeparatedChip() {
+  return <span className="el-chip-tag" data-testid="cal-separated">separated</span>
+}
+
 function PointsTable({ points, outliers }) {
   const [all, setAll] = useState(false)
   const rows = useMemo(
@@ -137,7 +142,7 @@ function PointsTable({ points, outliers }) {
           <tbody>
             {shown.map((p) => (
               <tr key={p.id} data-testid="cal-point-row" data-excluded={p.excluded ? 'true' : 'false'} className={p.excluded ? 'is-excluded' : ''}>
-                <td>{sourceLabel(p)}</td>
+                <td>{sourceLabel(p)}{p.separated ? <SeparatedChip /> : null}</td>
                 <td className="muted">{p.date ? formatShortDate(p.date) : '—'}</td>
                 <td>{p.coffee || '—'}</td>
                 <td><b>{p.setting}</b>{outliers.has(p.id) && !p.excluded ? <span className="el-badge">outlier</span> : null}</td>
@@ -176,7 +181,7 @@ function PointsList({ points, outliers }) {
             <span className={`el-point-mark ${p.excluded ? 'is-ex' : p.source === 'photo' ? 'is-photo' : 'is-shot'}`} aria-hidden="true" />
             <div className="el-point-main">
               <div className="el-point-top">
-                <b>{p.setting} · {round(p.um)} µm</b>
+                <span><b>{p.setting} · {round(p.um)} µm</b>{p.separated ? <SeparatedChip /> : null}</span>
                 <span className="muted">{p.date ? formatShortDate(p.date) : ''}</span>
               </div>
               <div className="el-point-sub">

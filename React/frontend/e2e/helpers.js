@@ -69,8 +69,10 @@ export function horizontalOverflow(page) {
 
 export const CALIBRATION_IMPORT = path.join(here, 'fixtures', 'calibration.json')
 
-export async function uploadFixture(page) {
-  await page.locator('input[type=file]:not([capture])').first().setInputFiles(FIXTURE)
+export const TOUCHING_FIXTURE = path.join(here, 'fixtures', 'touching.png')
+
+export async function uploadFixture(page, file = FIXTURE) {
+  await page.locator('input[type=file]:not([capture])').first().setInputFiles(file)
   const canvas = page.locator('canvas').first()
   await expect(canvas).toBeVisible()
   // the toolbar only exists once an image is loaded

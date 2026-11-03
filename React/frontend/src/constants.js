@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS = {
   edge_correction: true,
   axis_method: 'max_radius',
   volume_model: 'legacy',
+  split_touching: false,
   min_diameter_um: null,
 }
 
@@ -33,6 +34,7 @@ export const LEGACY_SETTINGS = {
   edge_correction: false,
   axis_method: 'max_radius',
   volume_model: 'legacy',
+  split_touching: false,
   min_diameter_um: null,
 }
 
@@ -46,6 +48,26 @@ export function settingsPayload(settings) {
     out[k] = v
   }
   return out
+}
+
+/**
+ * Request-body settings for the chosen engine. The old Cloud Run server rejects
+ * `volume_model: 'ellipsoid'` (422) and knows nothing of the split options, so with
+ * ?engine=cloud they are removed (ellipsoid falls back to 'legacy').
+ * Returns { body, stripped } where `stripped` lists what was removed or replaced.
+ */
+export function analysisSettingsPayload(settings, { isLocal = true } = {}) {
+  const body = settingsPayload(settings)
+  if (isLocal) return { body, stripped: [] }
+  const stripped = []
+  if (settings.split_touching) stripped.push('Separate touching particles')
+  delete body.split_touching
+  delete body.split_neck_ratio
+  if (body.volume_model === 'ellipsoid') {
+    body.volume_model = 'legacy'
+    stripped.push('Ellipsoid volume')
+  }
+  return { body, stripped }
 }
 
 export const API = import.meta.env.VITE_API_BASE || '/api'
