@@ -31,8 +31,10 @@ export function buildBins(xmin, xmax, xLog, bins) {
     : linspace(xmin, xmax, n)
   // 10**log10(x) can round slightly away from x (engine dependent), leaving the smallest/largest
   // value outside every bin. Pin the end edges to the exact range (mirrors plotting._build_bins).
-  if (n > 0) edges[0] = xmin
-  if (n > 1) edges[n - 1] = xmax
+  if (n > 1) {
+    edges[0] = xmin
+    edges[n - 1] = xmax
+  }
   return edges
 }
 
