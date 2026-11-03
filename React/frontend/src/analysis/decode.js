@@ -39,14 +39,27 @@ export function decodeError(file) {
 
 const BITMAP_OPTIONS = { imageOrientation: 'from-image', colorSpaceConversion: 'none', premultiplyAlpha: 'none' }
 
-/** createImageBitmap with the PIL-like options; retries bare when an option is rejected. */
+/**
+ * createImageBitmap with the PIL-like options. Some Safari versions reject an unknown
+ * `imageOrientation` value with a TypeError; the retry drops only that option, so the
+ * colour handling (no conversion, no premultiply) is kept.
+ */
 export async function bitmapFromFile(file, extra = {}) {
   try {
     return await createImageBitmap(file, { ...BITMAP_OPTIONS, ...extra })
   } catch (err) {
-    if (err instanceof TypeError) return createImageBitmap(file, extra)
+    if (err instanceof TypeError) {
+      const { imageOrientation: _dropped, ...kept } = BITMAP_OPTIONS
+      return createImageBitmap(file, { ...kept, ...extra })
+    }
     throw err
   }
+}
+
+function tooLargeError(width, height) {
+  const err = httpError(413, `Image is too large (${width}x${height}); limit is ${(MAX_PIXELS / 1e6).toFixed(0)} megapixels.`)
+  err.tooLarge = { width, height }
+  return err
 }
 
 function makeCanvas(w, h) {
@@ -103,8 +116,13 @@ export async function decodeFile(file, { resize = null, onProgress } = {}) {
   }
   try {
     const { width, height } = bitmap
-    if (!resize && width * height > MAX_PIXELS) {
-      throw httpError(413, `Image is too large (${width}x${height}); limit is ${(MAX_PIXELS / 1e6).toFixed(0)} megapixels.`)
+    if (!resize && width * height > MAX_PIXELS) throw tooLargeError(width, height)
+    if (resize && (Math.abs(width - resize.width) > 1 || Math.abs(height - resize.height) > 1)) {
+      // The browser ignored the resize request or applied it before the EXIF rotation:
+      // coordinates would no longer match what the UI shows.
+      const e = decodeError(file)
+      e.decodeFailed = true
+      throw e
     }
     const blue = readBlue(bitmap, width, height, { onProgress })
     return { width, height, blue }
@@ -135,9 +153,7 @@ export async function decodeViaImg(file, { onProgress } = {}) {
     const width = img.naturalWidth
     const height = img.naturalHeight
     if (!(width > 0 && height > 0)) throw decodeError(file)
-    if (width * height > MAX_PIXELS) {
-      throw httpError(413, `Image is too large (${width}x${height}); limit is ${(MAX_PIXELS / 1e6).toFixed(0)} megapixels.`)
-    }
+    if (width * height > MAX_PIXELS) throw tooLargeError(width, height)
     return { width, height, blue: readBlue(img, width, height, { onProgress }) }
   } finally {
     URL.revokeObjectURL(url)

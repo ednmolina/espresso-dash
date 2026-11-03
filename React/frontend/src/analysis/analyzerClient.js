@@ -5,7 +5,7 @@
 //
 //   const client = createAnalyzerClient({ getUser })
 //   client.request('/analyze', { json })   // same call shape as the old apiRequest
-//   client.cancel()  client.onProgress(cb)  client.dispose()
+//   client.cancel() -> true if stored analyses were lost   client.onProgress(cb)  client.dispose()
 //
 // Nothing here talks to Cloud Run (or /health) unless ?engine=cloud is in the URL.
 
@@ -104,7 +104,7 @@ export function createAnalyzerClient({ getUser } = {}) {
     return {
       mode,
       request: (path, opts) => apiRequest(getUser?.() ?? null, path, opts),
-      cancel() {},
+      cancel() { return false },
       onProgress: () => () => {},
       dispose() {},
     }
@@ -175,7 +175,8 @@ export function createAnalyzerClient({ getUser } = {}) {
         err.cancelled = true
         d.reject(err)
       }
-      engine.cancel()
+      // true when the cancel also dropped the stored analyses (the worker was terminated)
+      return engine.cancel()
     },
     onProgress: (cb) => engine.onProgress(cb),
     dispose: disposeLocalEngine,

@@ -217,7 +217,8 @@ export function createEngine() {
     }
     const fw = fullWidth ?? width
     const fh = fullHeight ?? height
-    if (fw * fh > MAX_PIXELS) {
+    // A photo the browser already shrank while decoding (decodeScale < 1) may be any size.
+    if (decodeScale >= 1 && fw * fh > MAX_PIXELS) {
       throw httpError(413, `Image is too large (${fw}x${fh}); limit is ${(MAX_PIXELS / 1e6).toFixed(0)} megapixels.`)
     }
     if (!blue || blue.length !== width * height) throw httpError(400, 'Could not decode image.')

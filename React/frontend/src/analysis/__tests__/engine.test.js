@@ -61,6 +61,31 @@ describe('registerImage', () => {
   })
 })
 
+describe('photos shrunk while decoding', () => {
+  it('accepts a >40 MP photo when it was decoded smaller, and keeps full-resolution coordinates', () => {
+    // 8064x6048 (48.8 MP) decoded at 80x60; the UI keeps showing / clicking the full photo.
+    const engine = createEngine()
+    const up = engine.registerImage({
+      width: 80, height: 60, blue: new Uint8Array(80 * 60).fill(200),
+      fullWidth: 8064, fullHeight: 6048, decodeScale: 80 / 8064,
+    })
+    expect([up.width, up.height]).toEqual([8064, 6048])
+    const out = engine.analyze({
+      image_id: up.image_id, ...GLOBAL,
+      reference_points: [[1000, 500], [5000, 500]], reference_physical_mm: 24.26,
+    }, {})
+    expect([out.width, out.height]).toEqual([80, 60])
+    expect(out.analysis_scale).toBeCloseTo(80 / 8064, 12)
+    expect(out.pixel_scale).toBeCloseTo((4000 / 24.26) * (80 / 8064), 12)
+  })
+
+  it('still rejects an undecoded photo above 40 MP', () => {
+    const engine = createEngine()
+    const err = fail(() => engine.registerImage({ width: 8064, height: 6048, blue: new Uint8Array(0) }))
+    expect(err.status).toBe(413)
+  })
+})
+
 describe('analyze', () => {
   it('returns the server shape with plain arrays and drawable layers', () => {
     const { engine, up, width, height } = setup()

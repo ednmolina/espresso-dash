@@ -119,7 +119,7 @@ self.onmessage = async (event) => {
       id,
       type: 'result',
       ok: false,
-      error: { message: err?.message || String(err), status: err?.status ?? 500, decodeFailed: Boolean(err?.decodeFailed) },
+      error: { message: err?.message || String(err), status: err?.status ?? 500, decodeFailed: Boolean(err?.decodeFailed), tooLarge: err?.tooLarge ?? null },
     })
   }
 }

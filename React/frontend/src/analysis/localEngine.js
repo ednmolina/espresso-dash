@@ -10,7 +10,12 @@
 //
 // Cancel terminates the worker. The File of the current photo is kept, so the next analyze
 // re-registers it under the same image_id transparently. Stored analyses die with the
-// worker, so erase/histogram then answer 404 and the UI asks the user to detect again.
+// worker, so erase/histogram then answer 404 and the UI asks the user to detect again
+// (cancel() returns true when that happened, so the UI can say so).
+//
+// A worker that crashes or fails to load before it ever answered (blocked chunk, bad base
+// path, CSP) is terminated, worker mode is switched off for good and the request is retried
+// on this thread.
 
 import {
   decodeError, decodeFile, decodeViaImg, cappedDims, httpError,
@@ -45,6 +50,7 @@ export function createLocalEngine({ forceInline = false } = {}) {
   let registeredId = null // the image currently held by the worker / inline engine
 
   let hasWorker = !forceInline && typeof Worker !== 'undefined'
+  let workerReplied = false // true once a worker has answered a request successfully
   const workerDecodes = typeof OffscreenCanvas !== 'undefined' && typeof createImageBitmap === 'function'
 
   const emit = (phase, fraction) => {
@@ -61,6 +67,15 @@ export function createLocalEngine({ forceInline = false } = {}) {
     for (const p of all) p.reject(err)
   }
 
+  /** The worker died (onerror / unreadable message): drop it and fail what it was doing. */
+  function workerCrashed(w, message) {
+    try { w.terminate() } catch { /* already gone */ }
+    if (worker === w) { worker = null; registeredId = null }
+    const err = httpError(500, message)
+    err.workerCrashed = true
+    failAll(err)
+  }
+
   function spawn() {
     if (worker) return worker
     // Static URL form: Vite bundles ./worker.js (with the whole engine) as its own chunk.
@@ -74,20 +89,22 @@ export function createLocalEngine({ forceInline = false } = {}) {
       const p = pending.get(msg.id)
       if (!p) return
       pending.delete(msg.id)
-      if (msg.ok) p.resolve(msg.result)
-      else {
+      if (msg.ok) {
+        workerReplied = true
+        p.resolve(msg.result)
+      } else {
         const err = new Error(msg.error.message)
         err.status = msg.error.status
         err.decodeFailed = msg.error.decodeFailed
+        if (msg.error.tooLarge) err.tooLarge = msg.error.tooLarge
         p.reject(err)
       }
     }
     w.onerror = (event) => {
       event.preventDefault?.()
-      if (worker === w) { worker = null; registeredId = null }
-      failAll(httpError(500, 'The analysis worker stopped unexpectedly. Try again.'))
+      workerCrashed(w, 'The analysis worker stopped unexpectedly. Try again.')
     }
-    w.onmessageerror = () => failAll(httpError(500, 'The analysis worker sent an unreadable message.'))
+    w.onmessageerror = () => workerCrashed(w, 'The analysis worker sent an unreadable message.')
     worker = w
     return w
   }
@@ -134,6 +151,22 @@ export function createLocalEngine({ forceInline = false } = {}) {
     return result
   }
 
+  /**
+   * Run `fn` (which reads `hasWorker` each time it runs). If the worker crashes before it
+   * ever answered, switch to inline mode for good and run `fn` once more.
+   */
+  async function withWorkerFallback(fn) {
+    ensureWorkerMode()
+    try {
+      return await fn()
+    } catch (err) {
+      if (!err?.workerCrashed || !hasWorker || workerReplied) throw err
+      hasWorker = false
+      registeredId = null
+      return fn()
+    }
+  }
+
   /** Start the worker if it is wanted; a browser that refuses (CSP, file://) falls back to inline. */
   function ensureWorkerMode() {
     if (hasWorker && !worker) {
@@ -162,8 +195,11 @@ export function createLocalEngine({ forceInline = false } = {}) {
 
   /** Decode on this thread (bitmap, or <img> when `viaImg`) and hand the blue channel over. */
   async function decodeHere(file, imageId, { viaImg = false, resize = null, fullWidth, fullHeight } = {}) {
+    const myEpoch = epoch
     const onProgress = (phase, fraction) => emit(phase, fraction)
     const decoded = viaImg ? await decodeViaImg(file, { onProgress }) : await decodeFile(file, { resize, onProgress })
+    // A cancelled (or superseded) decode must not replace the engine's current photo.
+    if (epoch !== myEpoch) throw cancelError()
     const extra = resize
       ? { fullWidth, fullHeight, decodeScale: decoded.width / fullWidth }
       : {}
@@ -185,45 +221,64 @@ export function createLocalEngine({ forceInline = false } = {}) {
     return decodeHere(file, imageId, opts)
   }
 
-  async function upload(file, { expect = null } = {}) {
-    ensureWorkerMode()
+  const isFatal = (err) => Boolean(err?.cancelled || err?.workerCrashed)
+
+  function upload(file, { expect = null } = {}) {
+    return withWorkerFallback(() => uploadOnce(file, expect))
+  }
+
+  async function uploadOnce(file, expect) {
     const myEpoch = epoch
     const imageId = newImageId()
-    let res
-    try {
-      res = await decodeWith(file, imageId)
-    } catch (err) {
-      if (err?.cancelled || epoch !== myEpoch) throw err?.cancelled ? err : cancelError()
-      if (!err?.decodeFailed && err?.status !== 500) throw err
-      // Memory failure on a very large photo: let the browser shrink it while decoding.
-      const dims = expect ? await expect : null
-      if (dims && dims.width * dims.height > MAX_DECODE_PIXELS) {
-        const cap = cappedDims(dims.width, dims.height)
-        try {
-          res = await decodeWith(file, imageId, { resize: cap, fullWidth: dims.width, fullHeight: dims.height })
-        } catch (err2) {
-          if (err2?.cancelled) throw err2
-          // fall through to the <img> path below
-        }
+    let shown = null // what the browser displays (EXIF-rotated); null when it could not be probed
+    try { shown = expect ? await expect : null } catch { shown = null }
+    if (!(shown?.width > 0 && shown?.height > 0)) shown = null
+    if (epoch !== myEpoch) throw cancelError()
+
+    let res = null
+    let resizeTried = false
+    // Decode at a capped size straight away (the browser shrinks while decoding). Photos
+    // above the cap are never decoded at full size: iOS runs out of memory, and the engine
+    // analyses at most MAX_DECODE_PIXELS anyway.
+    const decodeCapped = async (full) => {
+      resizeTried = true
+      try {
+        res = await decodeWith(file, imageId, { resize: cappedDims(full.width, full.height), fullWidth: full.width, fullHeight: full.height })
+      } catch (err) {
+        if (isFatal(err)) throw err
+        // fall through to the full-size / <img> paths
       }
-      if (!res && typeof document !== 'undefined') {
-        try {
-          res = await decodeHere(file, imageId, { viaImg: true })
-        } catch (err3) {
-          if (err3?.cancelled) throw err3
+    }
+    if (shown && shown.width * shown.height > MAX_DECODE_PIXELS) await decodeCapped(shown)
+
+    if (!res) {
+      try {
+        res = await decodeWith(file, imageId)
+      } catch (err) {
+        if (isFatal(err)) throw err
+        if (epoch !== myEpoch) throw cancelError()
+        // Not probed, but the decoder saw the size: too big for a full decode -> capped decode.
+        if (err?.tooLarge && !resizeTried) await decodeCapped(err.tooLarge)
+        else if (!err?.decodeFailed && err?.status !== 500) throw err
+        if (!res && shown && !resizeTried && shown.width * shown.height > MAX_DECODE_PIXELS) await decodeCapped(shown)
+        if (!res && typeof document !== 'undefined') {
+          try {
+            res = await decodeHere(file, imageId, { viaImg: true })
+          } catch (err3) {
+            if (isFatal(err3)) throw err3
+          }
         }
+        if (!res) throw err.decodeFailed ? decodeError(file) : err
       }
-      if (!res) throw err.decodeFailed ? decodeError(file) : err
     }
     // Orientation check against what the browser displays (EXIF handling differs between
     // decoders). A mismatch is redone through <img>, which honours EXIF like the page does.
-    const shown = expect ? await expect : null
     if (shown && (shown.width !== res.width || shown.height !== res.height) && typeof document !== 'undefined') {
       try {
         const again = await decodeHere(file, imageId, { viaImg: true })
         res = again
       } catch (err) {
-        if (err?.cancelled) throw err
+        if (isFatal(err)) throw err
         // keep the first decode; the caller falls back to the preview image
       }
     }
@@ -247,58 +302,67 @@ export function createLocalEngine({ forceInline = false } = {}) {
 
   // ---- operations --------------------------------------------------------------------------
 
-  async function analyze(body) {
-    ensureWorkerMode()
-    await ensureRegistered(body.image_id)
-    if (hasWorker) {
-      const result = await call('analyze', body)
-      return layersToImages(result, null)
-    }
-    return runInline(async ({ engine, layerToRgba }) => {
-      const result = engine.analyze(body, { onProgress: emit })
-      return layersToImages(result, layerToRgba)
+  function analyze(body) {
+    return withWorkerFallback(async () => {
+      await ensureRegistered(body.image_id)
+      if (hasWorker) {
+        const result = await call('analyze', body)
+        return layersToImages(result, null)
+      }
+      return runInline(async ({ engine, layerToRgba }) => {
+        const result = engine.analyze(body, { onProgress: emit })
+        return layersToImages(result, layerToRgba)
+      })
     })
   }
 
-  async function erase(body) {
-    ensureWorkerMode()
-    if (hasWorker) return layersToImages(await call('erase', body), null)
-    return runInline(async ({ engine, layerToRgba }) => layersToImages(engine.erase(body), layerToRgba))
+  function erase(body) {
+    return withWorkerFallback(async () => {
+      if (hasWorker) return layersToImages(await call('erase', body), null)
+      return runInline(async ({ engine, layerToRgba }) => layersToImages(engine.erase(body), layerToRgba))
+    })
   }
 
-  async function histogram(body) {
-    ensureWorkerMode()
-    if (hasWorker) return call('histogram', body)
-    return runInline(({ engine }) => engine.histogram(body))
+  function histogram(body) {
+    return withWorkerFallback(async () => {
+      if (hasWorker) return call('histogram', body)
+      return runInline(({ engine }) => engine.histogram(body))
+    })
   }
 
-  async function compare(body) {
-    ensureWorkerMode()
-    if (hasWorker) return call('compare', body)
-    return runInline(({ engine }) => engine.compare(body))
+  function compare(body) {
+    return withWorkerFallback(async () => {
+      if (hasWorker) return call('compare', body)
+      return runInline(({ engine }) => engine.compare(body))
+    })
   }
 
-  async function preview(imageId) {
-    const file = files.get(imageId)
-    if (!file) throw httpError(404, 'Image not found. Upload first.')
-    if (hasWorker && workerDecodes) return call('preview', { file })
-    try {
-      return await previewJpegB64(file)
-    } catch {
-      throw decodeError(file)
-    }
+  function preview(imageId) {
+    return withWorkerFallback(async () => {
+      const file = files.get(imageId)
+      if (!file) throw httpError(404, 'Image not found. Upload first.')
+      if (hasWorker && workerDecodes) return call('preview', { file })
+      try {
+        return await previewJpegB64(file)
+      } catch {
+        throw decodeError(file)
+      }
+    })
   }
 
   // ---- lifecycle ---------------------------------------------------------------------------
 
+  /** Returns true when stored analyses were lost (the worker that held them was terminated). */
   function cancel() {
     epoch += 1
+    const lostResults = Boolean(worker)
     if (worker) {
       worker.terminate()
       worker = null
     }
     registeredId = null
     failAll(cancelError())
+    return lostResults
   }
 
   function dispose() {
