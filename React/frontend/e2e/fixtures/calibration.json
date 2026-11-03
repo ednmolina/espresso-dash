@@ -1,0 +1,53 @@
+{
+  "format": "espressoLab.calibrationRuns",
+  "version": 1,
+  "exportedAt": "2026-06-10T09:00:00.000Z",
+  "runs": [
+    {
+      "id": "e2e-run-1",
+      "grindSetting": "9A",
+      "score": 90,
+      "index": 72,
+      "dv10_um": 391,
+      "dv50_um": 662,
+      "dv90_um": 1139,
+      "mean_um": 712,
+      "n_particles": 400,
+      "coffee": "E2E coffee",
+      "createdAt": "2026-06-01T08:00:00.000Z",
+      "excluded": false,
+      "apiShape": "new"
+    },
+    {
+      "id": "e2e-import-a",
+      "grindSetting": "8C",
+      "score": 82,
+      "index": 65,
+      "dv10_um": 360,
+      "dv50_um": 610,
+      "dv90_um": 1050,
+      "mean_um": 655,
+      "n_particles": 380,
+      "coffee": "Imported coffee",
+      "createdAt": "2026-06-05T08:00:00.000Z",
+      "excluded": false,
+      "apiShape": "new"
+    },
+    {
+      "id": "e2e-import-b",
+      "grindSetting": "13B",
+      "score": 131,
+      "index": 118,
+      "dv10_um": 640,
+      "dv50_um": 1020,
+      "dv90_um": 1760,
+      "mean_um": 1230,
+      "n_particles": 350,
+      "coffee": "Imported coffee",
+      "createdAt": "2026-06-06T08:00:00.000Z",
+      "excluded": false,
+      "apiShape": "new"
+    }
+  ],
+  "excludedShotIds": []
+}

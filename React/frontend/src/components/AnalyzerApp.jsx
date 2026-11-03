@@ -1,32 +1,80 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import ImageCanvas from './ImageCanvas'
 import Sidebar from './Sidebar'
-import ResultsPanel from './ResultsPanel'
-import { API, DEFAULT_SETTINGS, REFERENCE_OBJECTS } from '../constants'
+import ResultsPanel, { DistributionPanel, headlineOf } from './ResultsPanel'
+import HistogramChart, { SERIES_COLORS } from './HistogramChart'
+import GrindSettingPicker from './pages/GrindSettingPicker'
+import { Sheet, useBreakpoint } from './shell'
+import { API, DEFAULT_SETTINGS, REFERENCE_OBJECTS, settingsPayload } from '../constants'
+import {
+  errorMessage, particlesToCsv,
+  isNum, um, cleanUnit, formatSigma, sig,
+} from '../analyzerUtils'
+import { histogramKind, layerOf, mergeErase, normalizeSummary, previewSrc } from '../analyzerCompat'
+import { useShots } from '../shotsStore'
+import { useGrindCalibration } from '../useModels'
+import { addRun, runFromSummary } from '../calibrationStore'
+import { parseSetting } from '../grindCalibration'
+import { useNav } from '../navigation'
+import '../analyzer.css'
 
-const MODES = [
-  { id: 'reference', label: '1 · Reference', color: '#e63946' },
-  { id: 'polygon', label: '2 · Region', color: '#2a9d8f' },
-  { id: 'erase', label: '4 · Erase', color: '#ff8c00' },
-  { id: 'view', label: 'V · Pan / Zoom', color: '#555' },
+const HIDDEN_KEY = 'espressoLab.analyzer.resultsHidden.v1'
+
+function readHidden() {
+  try {
+    const v = window.localStorage.getItem(HIDDEN_KEY)
+    return v === 'true' || v === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeHidden(hidden) {
+  try {
+    window.localStorage.setItem(HIDDEN_KEY, String(hidden))
+  } catch {
+    // storage unavailable: the card just forgets its state on reload
+  }
+}
+
+const STEPS = [
+  { id: 'reference', n: '1', label: 'Scale', key: '1', color: 'var(--step-scale)' },
+  { id: 'polygon', n: '2', label: 'Region', key: '2', color: 'var(--step-region)' },
+  { id: 'detect', n: '3', label: 'Detect', key: '↵' },
+  { id: 'erase', n: '4', label: 'Clean up', key: '4', color: 'var(--step-clean)' },
+]
+
+const SHORTCUTS = [
+  ['1', 'Scale: click both edges of the coin'],
+  ['2', 'Region: outline the grounds'],
+  ['Enter', 'Detect particles (or remove marked clusters)'],
+  ['4', 'Clean up: mark stray clusters'],
+  ['V / Space', 'View mode: drag to pan'],
+  ['Z / Backspace', 'Undo last point'],
+  ['Esc', 'Clear points in this step / close this panel'],
+  ['+  −  0', 'Zoom in, zoom out, fit to window'],
+  ['Shift 1', 'Zoom to 100%'],
+  ['[  ]', 'Smaller / larger eraser brush'],
+  ['Arrow keys', 'Pan (when the photo is focused)'],
+  ['?', 'Show or hide this sheet'],
 ]
 
 function isInteractiveTarget(target) {
-  return target instanceof HTMLElement && (
-    target.isContentEditable ||
-    ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(target.tagName)
-  )
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+  if (target.tagName === 'INPUT') return !['checkbox', 'radio', 'range'].includes(target.type)
+  return ['TEXTAREA', 'SELECT'].includes(target.tagName)
 }
 
 function UploadActions({ onUpload, large = false }) {
   return (
     <div className={`upload-actions ${large ? 'large' : ''}`}>
-      <label className={`upload-btn ${large ? 'large' : ''}`}>
-        Choose Image
+      <label className={`upload-btn ${large ? 'large primary' : ''}`}>
+        Choose image
         <input type="file" accept="image/*" onChange={onUpload} hidden />
       </label>
       <label className={`upload-btn upload-btn-secondary ${large ? 'large' : ''}`}>
-        Take Photo
+        Take photo
         <input type="file" accept="image/*" capture="environment" onChange={onUpload} hidden />
       </label>
     </div>
@@ -41,6 +89,68 @@ async function authHeaders(user) {
   } catch {
     return {}
   }
+}
+
+/** fetch + JSON with the server's error detail surfaced as the thrown message. */
+async function apiRequest(user, path, { json, form, method = 'POST' } = {}) {
+  const headers = { ...await authHeaders(user) }
+  if (json) headers['Content-Type'] = 'application/json'
+  const res = await fetch(`${API}${path}`, {
+    method,
+    headers,
+    body: json ? JSON.stringify(json) : form,
+  })
+  let data = null
+  try {
+    data = await res.json()
+  } catch {
+    // non-JSON error page
+  }
+  if (!res.ok) {
+    throw new Error(errorMessage(data, res.status))
+  }
+  return data
+}
+
+/** Natural size of an image the browser can decode itself, or null. */
+function probeImage(src) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
+    img.onerror = () => resolve(null)
+    img.src = src
+  })
+}
+
+function downloadDataUrl(href, filename) {
+  const link = document.createElement('a')
+  link.href = href
+  link.download = filename
+  link.click()
+}
+
+function ChevronIcon({ up = false }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={up ? { transform: 'rotate(180deg)' } : undefined}>
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  )
+}
+
+function SlidersIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+      <path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" />
+    </svg>
+  )
+}
+
+function RulerIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="note-icon">
+      <path d="M3 17L17 3l4 4L7 21z" /><path d="M7 13l2 2M10 10l2 2M13 7l2 2" />
+    </svg>
+  )
 }
 
 export default function AnalyzerApp({ user }) {
@@ -59,20 +169,44 @@ export default function AnalyzerApp({ user }) {
   const [removedIds, setRemovedIds] = useState([])
   const [erasePoints, setErasePoints] = useState([])
   const [eraseRadius, setEraseRadius] = useState(20)
-  const [histogramB64, setHistogramB64] = useState(null)
-  const [histogramStats, setHistogramStats] = useState(null)
+  const [histogram, setHistogram] = useState(null)
+  const [histogramLoading, setHistogramLoading] = useState(false)
+  const [histWeight, setHistWeight] = useState('mass')
+  const [histExpanded, setHistExpanded] = useState(false)
   const [savedRuns, setSavedRuns] = useState([])
-  const [compareHistogram, setCompareHistogram] = useState(null)
-  const [compareStats, setCompareStats] = useState(null)
+  const [compare, setCompare] = useState(null)
   const [downloadsOpen, setDownloadsOpen] = useState(false)
-  const [status, setStatus] = useState('')
+  const [status, setStatus] = useState({ text: '', tone: 'info' })
   const [busy, setBusy] = useState(false)
+  const [busyLabel, setBusyLabel] = useState('Working…')
+  const [elapsed, setElapsed] = useState(0)
+  const [kbdOpen, setKbdOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [grindSetting, setGrindSetting] = useState('')
+  const [calSavedFor, setCalSavedFor] = useState(null)
+  const [resultsHidden, setResultsHidden] = useState(readHidden)
+  const [sheetDetent, setSheetDetent] = useState('half') // phone: 'half' | 'full' while the results are shown
+  const [dragH, setDragH] = useState(null)
+  const objectUrlRef = useRef(null)
+  const histSeq = useRef(0)
+  const downloadRef = useRef(null)
+  const kbdRef = useRef(null)
+  const rootRef = useRef(null)
+  const settingsWrapRef = useRef(null)
+  const settingsButtonRef = useRef(null)
+  const cardRef = useRef(null)
+  const dragRef = useRef(null)
 
-  let overlayB64 = null
-  if (analysisResult) {
-    if (overlayMode === 'threshold') overlayB64 = analysisResult.threshold_overlay_b64
-    else if (overlayMode === 'clusters') overlayB64 = analysisResult.cluster_overlay_b64
-  }
+  const isPhone = useBreakpoint() === 'phone'
+  const { go } = useNav()
+  const { shots } = useShots()
+  const calibration = useGrindCalibration(shots)
+
+  const say = (text, tone = 'info') => setStatus({ text, tone })
+
+  const layerB64 = overlayMode === 'original' ? null : layerOf(analysisResult, overlayMode)
+  const summary = analysisResult?.summary ?? null
+  const nsum = normalizeSummary(summary)
 
   let pixelScale = null
   if (referencePoints.length === 2 && referencePhysicalMm > 0) {
@@ -81,23 +215,93 @@ export default function AnalyzerApp({ user }) {
     pixelScale = Math.sqrt(dx * dx + dy * dy) / referencePhysicalMm
   }
 
+  const stepDone = {
+    reference: pixelScale != null,
+    polygon: polygonPoints.length >= 3,
+    detect: analysisResult != null,
+    erase: removedIds.length > 0,
+  }
+
+  useEffect(() => () => {
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
+  }, [])
+
+  useEffect(() => { writeHidden(resultsHidden) }, [resultsHidden])
+
+  // On a phone the analyzer fills the screen between the top bar and the tab bar.
+  useLayoutEffect(() => {
+    const el = rootRef.current
+    if (!el) return undefined
+    if (!isPhone) {
+      el.style.removeProperty('--analyzer-top')
+      return undefined
+    }
+    const update = () => {
+      const top = el.getBoundingClientRect().top + window.scrollY
+      el.style.setProperty('--analyzer-top', `${Math.max(0, Math.round(top))}px`)
+    }
+    update()
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
+    ro?.observe(document.documentElement)
+    ro?.observe(el)
+    window.addEventListener('resize', update)
+    window.addEventListener('orientationchange', update)
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', update)
+      window.removeEventListener('orientationchange', update)
+    }
+  }, [isPhone])
+
+  // Elapsed-seconds counter for the busy card.
+  useEffect(() => {
+    if (!busy) { setElapsed(0); return undefined }
+    const t0 = performance.now()
+    const id = setInterval(() => setElapsed((performance.now() - t0) / 1000), 100)
+    return () => clearInterval(id)
+  }, [busy])
+
+  const startBusy = (label) => { setBusyLabel(label); setBusy(true) }
+
   const handleUpload = async (e) => {
     const input = e.target
     const file = input.files[0]
     if (!file) return
     input.value = ''
 
-    setBusy(true)
-    setStatus('Uploading...')
+    startBusy('Uploading…')
+    say('Uploading…')
 
     const form = new FormData()
     form.append('file', file)
 
     try {
-      const res = await fetch(`${API}/upload`, { method: 'POST', headers: await authHeaders(user), body: form })
-      const data = await res.json()
+      // Show the local file straight away instead of downloading it back from
+      // the server. The server applies EXIF rotation exactly like browsers do;
+      // if the sizes disagree (or the browser can't decode the format), fall
+      // back to the server's rendering so clicks map to the analysed pixels.
+      // Older servers already return the image in the upload response, so
+      // /preview is only called when that is missing.
+      const localUrl = URL.createObjectURL(file)
+      const [data, local] = await Promise.all([
+        apiRequest(user, '/upload', { form }),
+        probeImage(localUrl),
+      ])
+      let src = localUrl
+      if (!local || local.width !== data.width || local.height !== data.height) {
+        URL.revokeObjectURL(localUrl)
+        src = previewSrc(data)
+        if (!src) {
+          const preview = await apiRequest(user, `/preview/${data.image_id}`, { method: 'GET' })
+          src = `data:${preview.image_mime};base64,${preview.image_b64}`
+        }
+      }
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
+      objectUrlRef.current = src.startsWith('blob:') ? src : null
+
+      histSeq.current += 1
       setImageId(data.image_id)
-      setImageSrc(`data:image/png;base64,${data.image_b64}`)
+      setImageSrc(src)
       setImageWidth(data.width)
       setImageHeight(data.height)
       setReferencePoints([])
@@ -105,11 +309,13 @@ export default function AnalyzerApp({ user }) {
       setErasePoints([])
       setAnalysisResult(null)
       setRemovedIds([])
-      setHistogramB64(null)
+      setHistogram(null)
+      setHistogramLoading(false)
+      setHistExpanded(false)
       setMode('reference')
-      setStatus('Image loaded. Click two points on your reference object.')
+      say('Click one edge of your reference coin to set the scale.')
     } catch (err) {
-      setStatus(`Upload failed: ${err.message}`)
+      say(`Upload failed: ${err.message}`, 'error')
     } finally {
       setBusy(false)
     }
@@ -119,7 +325,7 @@ export default function AnalyzerApp({ user }) {
     if (mode === 'reference') {
       setReferencePoints((prev) => {
         const next = [...prev, { x, y }]
-        return next.length > 2 ? next.slice(-2) : next
+        return next.length > 2 ? next.slice(-1) : next
       })
     } else if (mode === 'polygon') {
       setPolygonPoints((prev) => [...prev, { x, y }])
@@ -127,6 +333,14 @@ export default function AnalyzerApp({ user }) {
       setErasePoints((prev) => [...prev, { x, y }])
     }
   }, [mode])
+
+  // Keep the status line in step with the scale clicks.
+  useEffect(() => {
+    if (mode !== 'reference') return
+    if (referencePoints.length === 1) say('Now the opposite edge of the coin.')
+    else if (referencePoints.length === 2 && pixelScale) say(`Scale set: ${pixelScale.toFixed(1)} px/mm`, 'success')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [referencePoints.length])
 
   const handlePresetChange = (name) => {
     setReferencePreset(name)
@@ -161,90 +375,95 @@ export default function AnalyzerApp({ user }) {
     }
   }, [mode, referencePoints.length, polygonPoints.length, erasePoints.length])
 
-  const runAnalysis = useCallback(async () => {
+  /** Histogram for the current analysis; fetched automatically after detect/erase. */
+  const loadHistogram = useCallback(async (ids, weight) => {
     if (!imageId) return
-    setBusy(true)
-    setStatus('Analyzing...')
+    const seq = ++histSeq.current
+    setHistogramLoading(true)
+    try {
+      const data = await apiRequest(user, '/histogram', {
+        json: { image_id: imageId, removed_cluster_ids: ids, include_png: false, weight_mode: weight },
+      })
+      if (seq === histSeq.current) setHistogram(data)
+    } catch (err) {
+      if (seq === histSeq.current) say(`Histogram failed: ${err.message}`, 'error')
+    } finally {
+      if (seq === histSeq.current) setHistogramLoading(false)
+    }
+  }, [imageId, user])
+
+  const changeWeight = (weight) => {
+    if (weight === histWeight) return
+    setHistWeight(weight)
+    if (analysisResult?.summary) loadHistogram(removedIds, weight)
+  }
+
+  const canDetect = referencePoints.length === 2
+
+  const runAnalysis = useCallback(async () => {
+    if (!imageId || busy) return
+    if (!canDetect) { say('Set the scale first: click both edges of the coin.', 'error'); return }
+    startBusy('Detecting particles…')
+    say('Detecting particles…')
+    const started = performance.now()
 
     try {
-      const res = await fetch(`${API}/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...await authHeaders(user) },
-        body: JSON.stringify({
+      const data = await apiRequest(user, '/analyze', {
+        json: {
           image_id: imageId,
-          ...settings,
+          ...settingsPayload(settings),
           reference_points: referencePoints.map((point) => [point.x, point.y]),
           reference_physical_mm: referencePhysicalMm,
           polygon_points: polygonPoints.map((point) => [point.x, point.y]),
-        }),
+        },
       })
-      const data = await res.json()
       setAnalysisResult(data)
       setRemovedIds([])
       setErasePoints([])
+      setHistogram(null)
+      setHistExpanded(false)
       setOverlayMode('clusters')
       setMode('erase')
       setDownloadsOpen(false)
-      setStatus(`Done: ${data.nclusters} particles detected.`)
+      const secs = ((performance.now() - started) / 1000).toFixed(1)
+      say(`${(data.nclusters ?? 0).toLocaleString()} particles detected in ${secs}s. Click stray clusters to remove them.`, 'success')
+      if (data.summary) loadHistogram([], histWeight)
     } catch (err) {
-      setStatus(`Analysis failed: ${err.message}`)
+      say(`Detection failed: ${err.message}. Try lowering Threshold or Analysis resolution.`, 'error')
     } finally {
       setBusy(false)
     }
-  }, [imageId, settings, referencePoints, referencePhysicalMm, polygonPoints])
+  }, [imageId, busy, canDetect, settings, referencePoints, referencePhysicalMm, polygonPoints, user, loadHistogram, histWeight])
 
   const applyErase = useCallback(async () => {
     if (!imageId || !erasePoints.length) return
-    setBusy(true)
-    setStatus('Erasing...')
+    startBusy('Removing clusters…')
+    say('Removing clusters…')
 
     try {
-      const res = await fetch(`${API}/erase`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...await authHeaders(user) },
-        body: JSON.stringify({
+      const data = await apiRequest(user, '/erase', {
+        json: {
           image_id: imageId,
           erase_points: erasePoints.map((point) => [point.x, point.y]),
           erase_radius_px: eraseRadius,
           already_removed_ids: removedIds,
-        }),
+        },
       })
-      const data = await res.json()
-      setAnalysisResult((prev) => ({
-        ...prev,
-        cluster_overlay_b64: data.cluster_overlay_b64,
-        nclusters: data.nclusters,
-        summary: data.summary,
-        particles: data.particles,
-      }))
-      setRemovedIds(data.removed_ids)
+      const gone = data.removed_ids ?? removedIds
+      // newer servers send a transparent layer and no particles, older ones an opaque composite
+      setAnalysisResult((prev) => mergeErase(prev, data, gone))
+      setRemovedIds(gone)
       setErasePoints([])
-      setStatus(`${data.removed_ids.length} clusters removed.`)
+      setHistogram(null)
+      const added = gone.length - removedIds.length
+      say(added > 0 ? `${added} cluster${added === 1 ? '' : 's'} removed (${gone.length} in total).` : 'No clusters under the brush.', added > 0 ? 'success' : 'info')
+      if ((data.summary ?? analysisResult?.summary)) loadHistogram(gone, histWeight)
     } catch (err) {
-      setStatus(`Erase failed: ${err.message}`)
+      say(`Erase failed: ${err.message}`, 'error')
     } finally {
       setBusy(false)
     }
-  }, [imageId, erasePoints, eraseRadius, removedIds])
-
-  const fetchHistogram = async () => {
-    if (!imageId) return
-    setBusy(true)
-    try {
-      const res = await fetch(`${API}/histogram`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...await authHeaders(user) },
-        body: JSON.stringify({ image_id: imageId, removed_cluster_ids: removedIds }),
-      })
-      const data = await res.json()
-      setHistogramB64(data.histogram_b64)
-      setHistogramStats({ mean: data.mean, mean_upper: data.mean_upper, mean_lower: data.mean_lower, median: data.median, median_upper: data.median_upper, median_lower: data.median_lower, unit: data.unit, scale: data.scale })
-    } catch (err) {
-      setStatus(`Histogram failed: ${err.message}`)
-    } finally {
-      setBusy(false)
-    }
-  }
+  }, [imageId, erasePoints, eraseRadius, removedIds, user, loadHistogram, analysisResult, histWeight])
 
   const saveRun = () => {
     if (!analysisResult || !imageId) return
@@ -252,66 +471,168 @@ export default function AnalyzerApp({ user }) {
     const label = `Run ${savedRuns.length + 1}`
     setSavedRuns((prev) => [...prev, {
       label,
-      imageId,
+      // frozen server-side copy of this analysis (falls back for older servers)
+      imageId: analysisResult.analysis_id ?? imageId,
       removedIds: [...removedIds],
       summary: analysisResult.summary,
-      particles: analysisResult.particles,
     }])
-    setStatus(`${label} saved.`)
+    setCompare(null)
+    say(`${label} saved.`, 'success')
   }
+
+  const parsedSetting = parseSetting(grindSetting)
+  const calibrationDone = calSavedFor != null && calSavedFor === summary
+  const canSaveCalibration = Boolean(summary && parsedSetting && !calibrationDone && !busy)
+  const calibrationTitle = !summary
+    ? 'Run detection first'
+    : !parsedSetting
+      ? 'Pick the setting you used'
+      : calibrationDone
+        ? 'Already saved for this result'
+        : undefined
+
+  const saveCalibration = () => {
+    if (!canSaveCalibration) return
+    const partial = runFromSummary(summary, { grindSetting: parsedSetting.label, nclusters: analysisResult?.nclusters })
+    if (!partial) { say('This result has no size to add to the grinder curve.', 'error'); return }
+    const res = addRun(partial)
+    if (!res?.ok) { say(`Could not save the calibration point${res?.error ? `: ${res.error}` : ''}.`, 'error'); return }
+    setCalSavedFor(summary)
+    const size = isNum(partial.mean_um)
+      ? `${Math.round(partial.mean_um).toLocaleString()} µm mean`
+      : `${Math.round(partial.dv50_um).toLocaleString()} µm Dv50`
+    say(
+      `Calibration point saved (${parsedSetting.label} · ${size}).${res.persisted === false ? " It could not be stored in this browser, so it will be gone after a reload." : ''}`,
+      res.persisted === false ? 'info' : 'success',
+    )
+  }
+
+  const compareBody = (includePng) => ({
+    runs: savedRuns.map((r) => ({ image_id: r.imageId, removed_cluster_ids: r.removedIds, label: r.label })),
+    include_png: includePng,
+  })
 
   const fetchCompareHistogram = async () => {
     if (savedRuns.length < 2) return
-    setBusy(true)
+    startBusy('Comparing runs…')
     try {
-      const res = await fetch(`${API}/histogram/compare`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...await authHeaders(user) },
-        body: JSON.stringify({
-          runs: savedRuns.map((r) => ({ image_id: r.imageId, removed_cluster_ids: r.removedIds, label: r.label })),
-        }),
-      })
-      const data = await res.json()
-      setCompareHistogram(data.histogram_b64)
-      setCompareStats(data)
+      setCompare(await apiRequest(user, '/histogram/compare', { json: compareBody(false) }))
     } catch (err) {
-      setStatus(`Compare failed: ${err.message}`)
+      say(`Compare failed: ${err.message}`, 'error')
     } finally {
       setBusy(false)
     }
   }
 
   const downloadCsv = () => {
-    if (!analysisResult?.particles?.length) return
-    const columns = Object.keys(analysisResult.particles[0])
-    const csvRows = [
-      columns.join(','),
-      ...analysisResult.particles.map((row) => columns.map((column) => JSON.stringify(row[column] ?? '')).join(',')),
-    ]
-    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8' })
+    setDownloadsOpen(false)
+    const csv = particlesToCsv(analysisResult?.particles, removedIds)
+    if (!csv) { say('No particles to export.', 'error'); return }
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = 'particle-analysis.csv'
-    link.click()
-    URL.revokeObjectURL(url)
+    downloadDataUrl(url, 'particle-analysis.csv')
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
-  const downloadHistogram = () => {
-    if (!histogramB64) return
-    const link = document.createElement('a')
-    link.href = `data:image/png;base64,${histogramB64}`
-    link.download = 'particle-histogram.png'
-    link.click()
+  // The PNG chart is rendered server-side only when someone asks for the file.
+  const downloadHistogram = async () => {
+    startBusy('Rendering chart…')
+    try {
+      const data = await apiRequest(user, '/histogram', {
+        json: { image_id: imageId, removed_cluster_ids: removedIds, include_png: true, weight_mode: histWeight },
+      })
+      downloadDataUrl(`data:image/png;base64,${data.histogram_b64}`, 'particle-histogram.png')
+    } catch (err) {
+      say(`Download failed: ${err.message}`, 'error')
+    } finally {
+      setBusy(false)
+      setDownloadsOpen(false)
+    }
   }
+
+  const downloadCompare = async () => {
+    startBusy('Rendering chart…')
+    try {
+      const data = await apiRequest(user, '/histogram/compare', { json: compareBody(true) })
+      downloadDataUrl(`data:image/png;base64,${data.histogram_b64}`, 'run-comparison.png')
+    } catch (err) {
+      say(`Download failed: ${err.message}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clearRuns = () => {
+    setSavedRuns([])
+    setCompare(null)
+  }
+
+  // Download menu: close on outside click and Esc.
+  useEffect(() => {
+    if (!downloadsOpen) return undefined
+    const onDown = (e) => { if (downloadRef.current && !downloadRef.current.contains(e.target)) setDownloadsOpen(false) }
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); setDownloadsOpen(false) }
+    }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey, true)
+    downloadRef.current?.querySelector('[role=menuitem]')?.focus()
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [downloadsOpen])
+
+  // Settings popover (desktop/tablet): close on outside click and Esc.
+  const closeSettings = useCallback((restoreFocus = true) => {
+    setSettingsOpen(false)
+    if (restoreFocus) settingsButtonRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    if (!settingsOpen || isPhone) return undefined
+    const onDown = (e) => {
+      if (settingsWrapRef.current && !settingsWrapRef.current.contains(e.target) && !e.target.closest?.('.help-tip-portal')) {
+        setSettingsOpen(false)
+      }
+    }
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); closeSettings() }
+    }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [settingsOpen, isPhone, closeSettings])
+
+  useEffect(() => { if (kbdOpen) kbdRef.current?.focus() }, [kbdOpen])
 
   useEffect(() => {
     const onKeyDown = (event) => {
-      if (event.repeat || isInteractiveTarget(event.target) || busy) return
+      if (event.repeat || isInteractiveTarget(event.target)) return
+      if (event.ctrlKey || event.metaKey || event.altKey) return
+      // A focused button keeps its native Enter/Space activation.
+      if (event.target instanceof HTMLElement && event.target.tagName === 'BUTTON' &&
+          (event.key === 'Enter' || event.code === 'Space')) return
+      // While the settings are open, keys belong to them.
+      if (settingsOpen) return
 
       const key = event.key.toLowerCase()
 
-      if (key === '1') {
+      if (event.key === '?') {
+        event.preventDefault()
+        setKbdOpen((v) => !v)
+        return
+      }
+      if (kbdOpen) {
+        if (key === 'escape') { event.preventDefault(); setKbdOpen(false) }
+        return
+      }
+      if (busy) return
+
+      if (key === '1' && !event.shiftKey) {
         event.preventDefault()
         setMode('reference')
         return
@@ -323,7 +644,7 @@ export default function AnalyzerApp({ user }) {
         return
       }
 
-      if (key === '4') {
+      if (key === '4' && analysisResult) {
         event.preventDefault()
         setMode('erase')
         return
@@ -365,223 +686,655 @@ export default function AnalyzerApp({ user }) {
     busy,
     clearActivePoints,
     erasePoints.length,
+    kbdOpen,
     mode,
     runAnalysis,
+    settingsOpen,
     undoActivePoints,
   ])
 
+  // ---- results card / phone sheet --------------------------------------------------------
+  const hasResults = Boolean(analysisResult)
+  const detent = resultsHidden ? 'pill' : sheetDetent
+  const headline = headlineOf(summary)
+
+  const showResults = () => { setResultsHidden(false) }
+  const hideResults = () => { setResultsHidden(true) }
+  const sheetStepDown = () => {
+    if (resultsHidden) return
+    if (sheetDetent === 'full') setSheetDetent('half')
+    else setResultsHidden(true)
+  }
+  const sheetStepUp = () => {
+    if (resultsHidden) { setResultsHidden(false); setSheetDetent('half') } else setSheetDetent('full')
+  }
+  const sheetTap = () => {
+    if (resultsHidden) { setResultsHidden(false); setSheetDetent('half') } else setSheetDetent((d) => (d === 'half' ? 'full' : 'half'))
+  }
+
+  const onHandleDown = (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    const card = cardRef.current
+    if (!card) return
+    dragRef.current = { startY: e.clientY, startH: card.offsetHeight, t: e.timeStamp, moved: false }
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+  }
+  const onHandleMove = (e) => {
+    const d = dragRef.current
+    const card = cardRef.current
+    if (!d || !card) return
+    const dy = e.clientY - d.startY
+    if (Math.abs(dy) > 4) d.moved = true
+    if (d.moved) {
+      const maxH = (card.parentElement?.clientHeight ?? 600) - 56
+      setDragH(Math.max(64, Math.min(maxH, d.startH - dy)))
+    }
+  }
+  const onHandleUp = (e) => {
+    const d = dragRef.current
+    dragRef.current = null
+    setDragH(null)
+    if (!d) return
+    const dy = e.clientY - d.startY
+    const velocity = dy / Math.max(e.timeStamp - d.t, 1)
+    if (dy > 60 || (dy > 24 && velocity > 0.6)) sheetStepDown()
+    else if (dy < -60 || (dy < -24 && velocity < -0.6)) sheetStepUp()
+    else if (!d.moved) sheetTap()
+  }
+  const onHandleKey = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); sheetStepDown() }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sheetStepUp() }
+  }
+
+  const activeColor = STEPS.find((s) => s.id === mode)?.color ?? 'var(--el-text-2)'
+  // Present the combined stats in µm even when the server's axis unit is mm.
+  const rawUnit = cleanUnit(compare?.unit ?? 'mm')
+  const unit = rawUnit
+  const cscale = compare?.scale ?? 1
+  const toUm = rawUnit === 'mm' ? 1000 : 1
+  const runLabel = mode === 'erase' && analysisResult ? 'Re-run' : 'Detect particles ⏎'
+  const detectDisabled = busy || !canDetect
+  const detectTitle = !canDetect ? 'Set the scale first' : 'Run particle detection (Enter)'
+  const overlayOptions = ['original', 'threshold', 'clusters']
+  const regionClosed = polygonPoints.length >= 3
+
+  const onOverlayKey = (e) => {
+    const i = overlayOptions.indexOf(overlayMode)
+    let next = null
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = overlayOptions[(i + 1) % 3]
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = overlayOptions[(i + 2) % 3]
+    if (next) {
+      e.preventDefault()
+      setOverlayMode(next)
+      e.currentTarget.querySelector(`[data-value=${next}]`)?.focus()
+    }
+  }
+
+  // ---- calibration row -------------------------------------------------------------------
+  const estimate = parsedSetting ? calibration.estimate(parsedSetting.label) : null
+  let estimateText
+  if (!parsedSetting) estimateText = 'Pick the setting you used'
+  else if (!estimate || !isNum(estimate.um)) estimateText = 'No grinder curve yet'
+  else {
+    estimateText = `${parsedSetting.label} ≈ ${Math.round(estimate.um).toLocaleString()} µm`
+    if (estimate.kind === 'curve' && isNum(estimate.low) && isNum(estimate.high)) {
+      estimateText += ` · likely ${Math.round(estimate.low).toLocaleString()}–${Math.round(estimate.high).toLocaleString()} µm`
+    } else if (estimate.kind !== 'curve') {
+      estimateText += ' · typical of your points, no curve yet'
+    }
+  }
+  let matchText = null
+  if (estimate?.kind === 'curve' && isNum(estimate.low) && isNum(estimate.high) && nsum.meanMm != null) {
+    const measured = Math.round(nsum.meanMm * 1000)
+    const inside = measured >= estimate.low && measured <= estimate.high
+    matchText = inside
+      ? `This photo measured ${measured.toLocaleString()} µm, inside the likely range.`
+      : `This photo measured ${measured.toLocaleString()} µm, outside the likely range. Saving will pull the curve toward it.`
+  }
+
+  const calibrationRow = analysisResult ? (
+    <section className="calibration-row" aria-label="Grinder calibration">
+      <div className="cal-main">
+        <GrindSettingPicker
+          value={grindSetting}
+          onChange={(next) => setGrindSetting(next)}
+          layout="macro-micro"
+          tone={isPhone ? 'dark' : 'light'}
+          allowEmpty
+          testId="grind-picker"
+          label="Grind setting used"
+        />
+        <div className="cal-estimate">
+          <RulerIcon />
+          <div className="cal-estimate-text">
+            <span className="cal-estimate-main" data-testid="grind-estimate" aria-live="polite">{estimateText}</span>
+            <span className="cal-estimate-sub">
+              {matchText && <>{matchText} </>}
+              <button type="button" className="link-button" data-testid="see-calibration" onClick={() => go('grinder')}>See calibration</button>
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="cal-save">
+        <button
+          type="button"
+          className="btn-primary"
+          data-testid="save-calibration"
+          onClick={saveCalibration}
+          disabled={!canSaveCalibration}
+          title={calibrationTitle}
+        >
+          Save calibration point
+        </button>
+        <span className="cal-note">Adds a point to the Grinder curve. Stored in this browser.</span>
+      </div>
+    </section>
+  ) : null
+
+  const distribution = analysisResult && histExpanded ? (
+    <DistributionPanel
+      histogram={histogram}
+      loading={histogramLoading}
+      summary={summary}
+      weight={histWeight}
+      onWeightChange={changeWeight}
+      tone={isPhone ? 'dark' : 'light'}
+    />
+  ) : null
+
+  const runsPanel = analysisResult ? (
+    <section className="runs-panel" aria-label="Runs">
+      <div className="results-actions">
+        <button type="button" onClick={saveRun} disabled={busy || savedRuns.length >= 3}>Save run ({savedRuns.length}/3)</button>
+        <div className={`download-menu ${downloadsOpen ? 'open' : ''}`} ref={downloadRef}>
+          <button type="button" onClick={() => setDownloadsOpen((prev) => !prev)} aria-expanded={downloadsOpen} aria-haspopup="menu">
+            Download ▾
+          </button>
+          {downloadsOpen && (
+            <div className="download-menu-panel" role="menu">
+              <button type="button" role="menuitem" onClick={downloadCsv}>Particles (CSV)</button>
+              <button type="button" role="menuitem" onClick={downloadHistogram} disabled={!analysisResult.summary || busy}>Histogram (PNG)</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {savedRuns.length > 0 && (
+        <section className="results-section saved-runs-panel">
+          <div className="results-heading">
+            <h3>Saved runs</h3>
+            <button type="button" className="ghost small" onClick={clearRuns} disabled={busy}>Clear</button>
+          </div>
+          <table className="saved-runs-table">
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Particles</th>
+                <th>Dv50 µm</th>
+                <th>Fines</th>
+                <th>Mean µm</th>
+              </tr>
+            </thead>
+            <tbody>
+              {savedRuns.map((run, i) => (
+                <tr key={run.label}>
+                  <td><i className="run-swatch" style={{ background: SERIES_COLORS[i] }} />{run.label}</td>
+                  <td>{isNum(run.summary?.cluster_count) ? run.summary.cluster_count.toLocaleString() : '—'}</td>
+                  <td>{um(run.summary?.dv50_mm)}</td>
+                  <td>
+                    {run.summary?.fines_measurable === false ? 'n/a'
+                      : isNum(run.summary?.fines_volume_pct) ? `${run.summary.fines_volume_pct.toFixed(1)}%` : '—'}
+                  </td>
+                  <td>{um(run.summary?.diameter_mean_mm)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {savedRuns.length >= 2 && !compare && (
+            <button type="button" className="btn-primary" onClick={fetchCompareHistogram} disabled={busy}>Compare runs</button>
+          )}
+          {compare && (
+            <div className="histogram">
+              {histogramKind(compare) === 'png' ? (
+                <img className="histogram-png" alt="Size distribution of the saved runs" src={`data:image/png;base64,${compare.histogram_b64}`} />
+              ) : (
+                <HistogramChart data={compare.series} stats={compare.per_run} scale={cscale} unit={unit} tone={isPhone ? 'dark' : 'light'} />
+              )}
+              {compare.combined && (
+                <div className="compare-summary">
+                  <div><span>Mean of means</span><strong><b>{isNum(compare.combined.mean_of_means) ? sig(compare.combined.mean_of_means * cscale * toUm) : '—'}</b> {toUm === 1000 ? 'µm' : unit}</strong></div>
+                  <div><span>Median of medians</span><strong><b>{isNum(compare.combined.median_of_medians) ? sig(compare.combined.median_of_medians * cscale * toUm) : '—'}</b> {toUm === 1000 ? 'µm' : unit}</strong></div>
+                  <div><span>Run-to-run σ</span><strong>{formatSigma(isNum(compare.combined.std_of_means) ? compare.combined.std_of_means * cscale * toUm : null, toUm === 1000 ? 'µm' : unit)}</strong></div>
+                </div>
+              )}
+              {isNum(compare.min_diameter_um_applied) && (
+                <p className="results-note">Common cutoff applied to every run: {Math.round(compare.min_diameter_um_applied)} µm (largest detection limit).</p>
+              )}
+              <button type="button" className="ghost small" onClick={downloadCompare} disabled={busy}>Download comparison (PNG)</button>
+            </div>
+          )}
+        </section>
+      )}
+    </section>
+  ) : null
+
+  const resultsBody = (
+    <ResultsPanel
+      result={analysisResult}
+      histogram={histogram}
+      histogramLoading={histogramLoading}
+      weight={histWeight}
+      expanded={histExpanded}
+      onToggleExpand={() => {
+        if (isPhone && !histExpanded) setSheetDetent('full')
+        setHistExpanded((v) => !v)
+      }}
+    />
+  )
+
+  const emptyCard = (
+    <aside className="results-column results-card is-empty" aria-label="Results" data-testid="results-card-empty">
+      <div className="results-empty">
+        <h3>No results yet</h3>
+        <ul className="checklist">
+          <li className={stepDone.reference ? 'done' : ''}><span aria-hidden="true">{stepDone.reference ? '☑' : '☐'}</span> Scale set</li>
+          <li className={stepDone.polygon ? 'done' : ''}><span aria-hidden="true">{stepDone.polygon ? '☑' : '☐'}</span> Region (optional)</li>
+          <li><span aria-hidden="true">☐</span> Detect</li>
+        </ul>
+        <button type="button" className="btn-primary btn-large" onClick={runAnalysis} disabled={detectDisabled} title={detectTitle}>
+          {busy && busyLabel.startsWith('Detecting') ? 'Running…' : 'Run particle detection'}
+        </button>
+      </div>
+    </aside>
+  )
+
+  const headlineText = headline ? `${headline.label} ${um(headline.mm)} µm` : 'Results'
+
+  const desktopCard = hasResults && !isPhone ? (
+    <>
+      <aside
+        ref={cardRef}
+        className={`results-column results-card ${resultsHidden ? 'is-hidden' : ''}`}
+        aria-label="Results"
+        aria-hidden={resultsHidden ? 'true' : undefined}
+        data-testid="results-card"
+      >
+        <div className="card-top">
+          <button
+            type="button"
+            className="card-toggle"
+            data-testid="results-toggle"
+            aria-expanded={!resultsHidden}
+            aria-label="Hide results"
+            onClick={hideResults}
+            tabIndex={resultsHidden ? -1 : 0}
+          >
+            Hide
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 8h8v8" /><path d="M16 8L6 18" /></svg>
+          </button>
+        </div>
+        {resultsBody}
+      </aside>
+      <button
+        type="button"
+        className={`results-pill ${resultsHidden ? 'is-shown' : ''}`}
+        data-testid="results-pill"
+        aria-expanded={!resultsHidden}
+        aria-label={`Show results, ${headline ? `${headline.label} ${um(headline.mm)} micrometres` : 'summary'}`}
+        onClick={showResults}
+        tabIndex={resultsHidden ? 0 : -1}
+      >
+        <span className="pill-text"><span className="pill-label">{headline?.label ?? 'Results'}</span> {headline ? `${um(headline.mm)} µm` : ''}</span>
+        <ChevronIcon />
+      </button>
+    </>
+  ) : null
+
+  const phoneSheet = hasResults && isPhone ? (
+    <aside
+      ref={cardRef}
+      className={`results-column results-card is-sheet ${dragH != null ? 'is-dragging' : ''}`}
+      aria-label="Results"
+      data-testid="results-card"
+      data-detent={detent}
+      style={dragH != null ? { height: `${dragH}px` } : undefined}
+    >
+      <button
+        type="button"
+        className="sheet-handle"
+        data-testid="results-handle"
+        aria-label="Resize results"
+        onPointerDown={onHandleDown}
+        onPointerMove={onHandleMove}
+        onPointerUp={onHandleUp}
+        onPointerCancel={() => { dragRef.current = null; setDragH(null) }}
+        onKeyDown={onHandleKey}
+        onClick={(e) => { if (e.detail === 0) sheetTap() }}
+      >
+        <span aria-hidden="true" />
+      </button>
+      <div className="sheet-head">
+        {detent === 'pill' ? (
+          <button type="button" className="sheet-headline" data-testid="results-pill" onClick={showResults} aria-label={`Show results, ${headlineText}`}>
+            <span className="pill-label">{headline?.label ?? 'Results'}</span> {headline ? `${um(headline.mm)} µm` : ''}
+          </button>
+        ) : (
+          <h3 className="card-title">Results</h3>
+        )}
+        <button
+          type="button"
+          className="card-toggle"
+          data-testid="results-toggle"
+          aria-expanded={!resultsHidden}
+          aria-label={resultsHidden ? 'Show results' : 'Hide results'}
+          onClick={() => (resultsHidden ? showResults() : hideResults())}
+        >
+          {resultsHidden ? 'Show' : 'Hide'}
+          <span className={`toggle-chevron ${resultsHidden ? 'is-up' : ''}`}><ChevronIcon /></span>
+        </button>
+      </div>
+      <div className="sheet-body">
+        {resultsBody}
+        {distribution}
+        <div className="sheet-divider" />
+        {calibrationRow}
+        {runsPanel}
+      </div>
+    </aside>
+  ) : null
+
+  const settingsContent = (
+    <Sidebar
+      settings={settings}
+      onSettingsChange={setSettings}
+      referencePreset={referencePreset}
+      onPresetChange={handlePresetChange}
+      referencePhysicalMm={referencePhysicalMm}
+      onPhysicalMmChange={setReferencePhysicalMm}
+      onClose={isPhone ? undefined : () => closeSettings()}
+      showTitle={!isPhone}
+    />
+  )
+
   return (
-    <div className="analyzer-app">
-      <Sidebar
-        settings={settings}
-        onSettingsChange={setSettings}
-        referencePreset={referencePreset}
-        onPresetChange={handlePresetChange}
-        referencePhysicalMm={referencePhysicalMm}
-        onPhysicalMmChange={setReferencePhysicalMm}
-      />
-
-      <main className="analyzer-main">
-        <header className="topbar">
-          <h1>Coffee Grind Size Analyzer</h1>
-          <UploadActions onUpload={handleUpload} />
-        </header>
-
-        {status && <div className="status">{busy ? 'Working... ' : ''}{status}</div>}
-
-        {imageSrc && (
-          <div className="toolbar">
-            {MODES.map((item) => (
-              <button
-                key={item.id}
-                className={`mode-btn ${mode === item.id ? 'active' : ''}`}
-                style={{ '--mode-color': item.color }}
-                onClick={() => setMode(item.id)}
+    <div
+      ref={rootRef}
+      className={`analyzer-app ${imageSrc ? 'has-image' : ''} ${isPhone ? 'is-phone' : ''} ${analysisResult ? 'has-results' : ''}`}
+      data-testid="analyzer-app"
+    >
+      <header className="analyzer-head">
+        <h1>Grind Analyzer</h1>
+        <div className="analyzer-head-actions">
+          {imageSrc && !isPhone && <UploadActions onUpload={handleUpload} />}
+          <div className="settings-wrap" ref={settingsWrapRef}>
+            <button
+              type="button"
+              ref={settingsButtonRef}
+              className="settings-button"
+              data-testid="settings-open"
+              aria-haspopup="dialog"
+              aria-expanded={settingsOpen}
+              onClick={() => setSettingsOpen((v) => !v)}
+            >
+              <SlidersIcon /> Settings
+            </button>
+            {!isPhone && (
+              <div
+                className="settings-popover"
+                role="dialog"
+                aria-label="Analyzer settings"
+                hidden={!settingsOpen}
               >
-                {item.label}
-              </button>
-            ))}
+                {settingsContent}
+              </div>
+            )}
+          </div>
+        </div>
+      </header>
 
-            <div className="toolbar-sep" />
+      {isPhone && (
+        <Sheet
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          title="Settings"
+          rightAction={{ label: 'Done', onClick: () => setSettingsOpen(false) }}
+          detents={['medium', 'large']}
+          initialDetent="large"
+          testId="analyzer-settings-sheet"
+        >
+          <div className="settings-sheet-body">
+            {imageSrc && (
+              <div className="settings-photo">
+                <span className="settings-photo-label">Photo</span>
+                <UploadActions onUpload={handleUpload} />
+              </div>
+            )}
+            {settingsContent}
+          </div>
+        </Sheet>
+      )}
 
+      {imageSrc && (
+        <div className="toolbar">
+          <ol className="stepper" aria-label="Steps">
+            {STEPS.map((step) => {
+              const isCurrent = mode === step.id
+              const isDone = !isCurrent && stepDone[step.id]
+              const isDisabled = !isCurrent && !isDone && step.id === 'erase' && !analysisResult
+              const detectBlocked = step.id === 'detect' && !canDetect
+              const onClick = step.id === 'detect' ? runAnalysis : () => setMode(step.id)
+              const disabled = busy || (step.id === 'erase' && !analysisResult) || detectBlocked
+              let title = `Shortcut: ${step.key}`
+              if (step.id === 'erase' && !analysisResult) title = 'Run detection first'
+              else if (detectBlocked) title = 'Set the scale first'
+              return (
+                <li key={step.id}>
+                  <button
+                    type="button"
+                    className={`step ${isCurrent ? 'current' : ''} ${isDone ? 'done' : ''} ${(isDisabled || (disabled && !isCurrent && !isDone)) ? 'is-disabled' : ''}`}
+                    style={step.color ? { '--step-color': step.color } : undefined}
+                    aria-current={isCurrent ? 'step' : undefined}
+                    onClick={onClick}
+                    disabled={disabled}
+                    title={title}
+                  >
+                    <span className="step-n" aria-hidden="true">{isDone ? '✓' : step.n}</span>
+                    <span className="step-label">{step.label}</span>
+                    {step.id === 'detect' && busy && busyLabel.startsWith('Detecting') && <span className="spinner" aria-hidden="true" />}
+                  </button>
+                </li>
+              )
+            })}
+          </ol>
+
+          <div className="toolbar-context" style={{ '--mode-color': activeColor }}>
             {mode === 'reference' && (
               <>
                 <span className="toolbar-hint">
-                  {referencePoints.length < 2 ? `Click ${2 - referencePoints.length} more point(s)` : `OK ${pixelScale?.toFixed(2)} px/mm`}
+                  {referencePoints.length === 0 && 'Click one edge of the coin'}
+                  {referencePoints.length === 1 && 'Now the opposite edge'}
+                  {referencePoints.length === 2 && <>Scale set: <strong>{pixelScale?.toFixed(1)}</strong> px/mm</>}
                 </span>
-                <button onClick={undoActivePoints} disabled={!referencePoints.length}>Undo</button>
-                <button onClick={clearActivePoints} disabled={!referencePoints.length}>Clear</button>
+                <button type="button" className="ghost" onClick={undoActivePoints} disabled={!referencePoints.length}>Undo</button>
+                <button type="button" className="ghost" onClick={clearActivePoints} disabled={!referencePoints.length}>Clear</button>
               </>
             )}
 
             {mode === 'polygon' && (
               <>
-                <span className="toolbar-hint">{polygonPoints.length} point(s)</span>
-                <button onClick={undoActivePoints} disabled={!polygonPoints.length}>Undo</button>
-                <button onClick={clearActivePoints} disabled={!polygonPoints.length}>Clear</button>
+                <span className="toolbar-hint">
+                  {!regionClosed
+                    ? 'Optional: outline the grounds (3+ points) or skip to Detect'
+                    : `${polygonPoints.length}-point region · click the first point to close`}
+                </span>
+                <button type="button" className="ghost" onClick={undoActivePoints} disabled={!polygonPoints.length}>Undo</button>
+                <button type="button" className="ghost" onClick={clearActivePoints} disabled={!polygonPoints.length}>Clear</button>
               </>
             )}
 
             {mode === 'erase' && analysisResult && (
               <>
+                <span className="toolbar-hint hint-erase">
+                  {erasePoints.length ? `${erasePoints.length} marked` : 'Click stray clusters to mark them · [ ] brush size'}
+                </span>
                 <label className="toolbar-inline-field">
-                  Radius
+                  Brush
                   <input
                     type="number"
                     min={2}
                     max={500}
                     step={1}
                     value={eraseRadius}
-                    onChange={(event) => setEraseRadius(parseInt(event.target.value, 10))}
+                    onChange={(event) => setEraseRadius(Math.max(2, Math.min(500, parseInt(event.target.value, 10) || 2)))}
                   />
                   px
                 </label>
-                <button onClick={applyErase} disabled={!erasePoints.length || busy} className="btn-primary">
-                  Apply Erase
+                <button
+                  type="button"
+                  onClick={applyErase}
+                  disabled={!erasePoints.length || busy}
+                  className="btn-primary"
+                  title={erasePoints.length ? 'Remove the marked clusters (Enter)' : 'Click particles to mark them'}
+                >
+                  Remove{erasePoints.length ? ` (${erasePoints.length})` : ''}
                 </button>
-                <button onClick={clearActivePoints} disabled={!erasePoints.length}>Clear</button>
-                <button onClick={() => { setRemovedIds([]); setErasePoints([]); runAnalysis() }} disabled={busy}>Reset</button>
+                <button type="button" className="ghost" onClick={clearActivePoints} disabled={!erasePoints.length}>Clear</button>
               </>
             )}
 
-            <div className="toolbar-sep" />
-
-            {analysisResult && (
-              <div className="overlay-btns">
-                {['original', 'threshold', 'clusters'].map((value) => (
-                  <button key={value} className={overlayMode === value ? 'active' : ''} onClick={() => setOverlayMode(value)}>
-                    {value.charAt(0).toUpperCase() + value.slice(1)}
-                  </button>
-                ))}
-              </div>
-            )}
+            {mode === 'view' && <span className="toolbar-hint">Drag to pan · scroll or pinch to zoom</span>}
           </div>
-        )}
 
-        <div className="canvas-area">
-          {imageSrc ? (
-            <ImageCanvas
-              imageSrc={imageSrc}
-              imageWidth={imageWidth}
-              imageHeight={imageHeight}
-              mode={mode}
-              referencePoints={referencePoints}
-              polygonPoints={polygonPoints}
-              erasePoints={erasePoints}
-              eraseRadius={eraseRadius}
-              onPointAdded={handlePointAdded}
-              overlayB64={overlayB64}
-            />
-          ) : (
-            <div className="empty-state">
-              <p>Upload an image to get started.</p>
-              <UploadActions onUpload={handleUpload} large />
-            </div>
-          )}
+          <button
+            type="button"
+            className={`btn-primary toolbar-primary ${analysisResult && mode === 'erase' ? 'is-rerun' : ''}`}
+            onClick={runAnalysis}
+            disabled={detectDisabled}
+            title={detectTitle}
+          >
+            {busy && busyLabel.startsWith('Detecting') ? 'Detecting…' : runLabel}
+          </button>
         </div>
+      )}
 
-        {imageSrc && (
-          <div className="action-bar">
-            <button className="btn-primary btn-large" onClick={runAnalysis} disabled={busy}>
-              {busy ? 'Running...' : '3 · Run Particle Detection'}
-            </button>
-            {analysisResult && (
-              <button onClick={fetchHistogram} disabled={busy}>
-                Show Histogram
-              </button>
-            )}
-            {analysisResult && savedRuns.length < 3 && (
-              <button onClick={saveRun} disabled={busy}>
-                Save Run ({savedRuns.length}/3)
-              </button>
-            )}
-            {savedRuns.length > 0 && (
-              <button onClick={() => { setSavedRuns([]); setCompareHistogram(null); setCompareStats(null); setHistogramB64(null); setHistogramStats(null) }} disabled={busy}>
-                Clear Runs
-              </button>
-            )}
-            {analysisResult && (
-              <div className={`download-menu ${downloadsOpen ? 'open' : ''}`}>
-                <button type="button" onClick={() => setDownloadsOpen((prev) => !prev)}>
-                  Download
-                </button>
-                {downloadsOpen && (
-                  <div className="download-menu-panel">
-                    <button type="button" onClick={downloadCsv}>
-                      Download CSV
-                    </button>
-                    <button type="button" onClick={downloadHistogram} disabled={!histogramB64}>
-                      Download Current Chart
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
+      <div className={`canvas-area ${imageSrc ? '' : 'is-empty'}`} aria-busy={busy ? 'true' : 'false'}>
+        {imageSrc ? (
+          <ImageCanvas
+            imageSrc={imageSrc}
+            imageWidth={imageWidth}
+            imageHeight={imageHeight}
+            mode={mode}
+            referencePoints={referencePoints}
+            polygonPoints={polygonPoints}
+            erasePoints={erasePoints}
+            eraseRadius={eraseRadius}
+            onPointAdded={handlePointAdded}
+            layerB64={layerB64}
+            pixelScale={pixelScale}
+            referenceMm={referencePhysicalMm}
+            onEraseRadiusChange={setEraseRadius}
+            onPolygonClose={() => say(`Region closed with ${polygonPoints.length} points.`, 'success')}
+          />
+        ) : (
+          <div className="empty-state">
+            <div className="empty-illustration" aria-hidden="true">
+              {Array.from({ length: 18 }).map((_, i) => <span key={i} style={{ '--i': i }} />)}
+            </div>
+            <h2>Start with a photo of your grounds</h2>
+            <p>
+              Spread a pinch of coffee thinly on white paper, place a coin beside it, and shoot straight down in even light.
+            </p>
+            <UploadActions onUpload={handleUpload} large />
           </div>
         )}
 
-        <ResultsPanel result={analysisResult} histogramB64={histogramB64} histogramStats={histogramStats} />
+        {imageSrc && analysisResult && (
+          <div
+            className="canvas-hud hud-top-left overlay-btns"
+            role="radiogroup"
+            aria-label="Overlay"
+            onKeyDown={onOverlayKey}
+          >
+            {overlayOptions.map((value) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                data-value={value}
+                aria-checked={overlayMode === value}
+                tabIndex={overlayMode === value ? 0 : -1}
+                className={overlayMode === value ? 'active' : ''}
+                onClick={() => setOverlayMode(value)}
+              >
+                {value.charAt(0).toUpperCase() + value.slice(1)}
+              </button>
+            ))}
+          </div>
+        )}
 
-        {savedRuns.length > 0 && (
-          <div className="saved-runs-panel">
-            <h3>Saved Runs</h3>
-            <table className="saved-runs-table">
-              <thead>
-                <tr>
-                  <th>Run</th>
-                  <th>Particles</th>
-                  <th>Mean Ø (mm)</th>
-                  <th>Std Ø (mm)</th>
-                  <th>Extraction (%)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {savedRuns.map((run) => (
-                  <tr key={run.label}>
-                    <td>{run.label}</td>
-                    <td>{run.summary?.cluster_count ?? '—'}</td>
-                    <td>{run.summary?.diameter_mean_mm?.toFixed(3) ?? '—'}</td>
-                    <td>{run.summary?.diameter_std_mm?.toFixed(3) ?? '—'}</td>
-                    <td>{run.summary?.average_extraction_yield_pct?.toFixed(1) ?? '—'}</td>
-                  </tr>
+        {imageSrc && !analysisResult && !isPhone && emptyCard}
+        {desktopCard}
+        {phoneSheet}
+
+        {busy && imageSrc && (
+          <div className="canvas-scrim">
+            <div className="busy-card" role="status">
+              <div className="busy-title"><span className="spinner" aria-hidden="true" />{busyLabel}</div>
+              <div className="busy-bar" aria-hidden="true"><i /></div>
+              <div className="busy-elapsed">{elapsed.toFixed(1)} s</div>
+            </div>
+          </div>
+        )}
+
+        {kbdOpen && (
+          <div className="kbd-backdrop" onClick={() => setKbdOpen(false)}>
+            <div
+              className="kbd-sheet"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Keyboard shortcuts"
+              tabIndex={-1}
+              ref={kbdRef}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="kbd-head">
+                <h2>Keyboard shortcuts</h2>
+                <button type="button" className="ghost small" onClick={() => setKbdOpen(false)} aria-label="Close shortcuts">Esc</button>
+              </div>
+              <dl>
+                {SHORTCUTS.map(([k, d]) => (
+                  <div key={k}><dt><kbd>{k}</kbd></dt><dd>{d}</dd></div>
                 ))}
-                {(() => {
-                  const means = savedRuns.map((r) => r.summary?.diameter_mean_mm).filter((v) => v != null && !isNaN(v))
-                  if (means.length < 2) return null
-                  const avg = means.reduce((a, b) => a + b, 0) / means.length
-                  return (
-                    <tr className="saved-runs-summary-row">
-                      <td>Mean across runs</td>
-                      <td>—</td>
-                      <td>{avg.toFixed(3)} mm</td>
-                      <td>—</td>
-                      <td>—</td>
-                    </tr>
-                  )
-                })()}
-              </tbody>
-            </table>
-            {savedRuns.length >= 2 && (
-              <button onClick={fetchCompareHistogram} disabled={busy} style={{ marginTop: '0.75rem' }}>
-                Compare Runs Histogram
-              </button>
-            )}
-            {compareHistogram && (
-              <div className="histogram">
-                <h4>Run Comparison</h4>
-                <img className="histogram-image" src={`data:image/png;base64,${compareHistogram}`} alt="Comparison histogram" />
-                {compareStats?.combined && (
-                  <div className="histogram-stats">
-                    <span>Mean of means: <strong>{compareStats.combined.mean_of_means?.toFixed(3)} mm</strong></span>
-                    <span>Median of medians: <strong>{compareStats.combined.median_of_medians?.toFixed(3)} mm</strong></span>
-                    <span>Run-to-run σ: <strong>±{compareStats.combined.std_of_means?.toFixed(3)} mm</strong></span>
-                  </div>
-                )}
-              </div>
-            )}
+              </dl>
+            </div>
           </div>
         )}
-      </main>
+      </div>
+
+      <div className="status-row">
+        {status.text ? (
+          <div
+            className={`status status-${status.tone}`}
+            role={status.tone === 'error' ? 'alert' : 'status'}
+            aria-live="polite"
+          >
+            <i className="status-dot" aria-hidden="true" />
+            <span className="status-text">{status.text}</span>
+            {status.tone === 'error' && (
+              <button type="button" className="ghost small status-dismiss" aria-label="Dismiss message" onClick={() => say('')}>Dismiss</button>
+            )}
+          </div>
+        ) : <div className="status status-empty" aria-live="polite" />}
+        <button type="button" className="ghost small kbd-open" onClick={() => setKbdOpen(true)}>? Shortcuts</button>
+      </div>
+
+      {!isPhone && imageSrc && analysisResult && (
+        <div className="analyzer-below">
+          {calibrationRow}
+          {distribution}
+          {runsPanel}
+        </div>
+      )}
     </div>
   )
 }

@@ -1,3 +1,8 @@
+# Vendored golden reference: cloudrun/coffeegrindsize_core/analysis.py @ e299811 (pure NumPy, no numba).
+# Modification: every ``np.argsort(x)`` is replaced by ``_stable_argsort(x)`` (kind="stable").
+# DO NOT EDIT. Regenerate with:  python tests/reference/extract.py  (verify: --check).
+# Used only by tests/ as an exact-equality oracle for the numba implementation.
+# Production code must never import it (see tests/core/test_guard.py).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,6 +13,10 @@ import numpy as np
 import pandas as pd
 from matplotlib.path import Path
 from PIL import Image
+
+def _stable_argsort(values):
+    return np.argsort(values, kind="stable")
+
 
 DEFAULT_REFERENCE_THRESHOLD = 0.4
 DEFAULT_THRESHOLD_PERCENT = 58.8
@@ -407,7 +416,7 @@ def _detect_particles(
     if polygon_mask is not None:
         edge_lookup = _polygon_edge_lookup(rows, cols, settings.analysis_polygon)
 
-    sort_indices = np.argsort(blue_channel[rows, cols].astype(float))
+    sort_indices = _stable_argsort(blue_channel[rows, cols].astype(float))
     row_positions = rows[sort_indices].astype(float)
     col_positions = cols[sort_indices].astype(float)
     blue_values = blue_channel[rows[sort_indices], cols[sort_indices]].astype(float)
@@ -446,7 +455,7 @@ def _detect_particles(
             accepted_positions = np.arange(cluster_indices.size, dtype=int)
         else:
             cluster_indices = cluster_indices[
-                np.argsort(
+                _stable_argsort(
                     (row_positions[cluster_indices] - row_positions[current]) ** 2
                     + (col_positions[cluster_indices] - col_positions[current]) ** 2
                 )
@@ -580,7 +589,7 @@ def _filter_cluster_pixels(
             & (distance_to_reference <= reference_distance)
         )[0]
         projected = np.sqrt(distance_to_reference[on_path] ** 2 - line_distances[on_path] ** 2)
-        ordered_path = on_path[np.argsort(projected)]
+        ordered_path = on_path[_stable_argsort(projected)]
         ordered_projected = np.sqrt(
             distance_to_reference[ordered_path] ** 2 - line_distances[ordered_path] ** 2
         )

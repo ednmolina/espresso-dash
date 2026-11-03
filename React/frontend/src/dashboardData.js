@@ -1,35 +1,55 @@
 import {
   addDoc,
   collection,
+  deleteField,
   doc,
-  getDocs,
+  getDocsFromServer,
   updateDoc,
 } from 'firebase/firestore'
-import { db } from './firebase'
+import { db } from './firestore'
+import { grindSettingToScore } from './grindCalibration'
+import {
+  buildForecastModel,
+  coffeeKey,
+  forecast,
+  sweepGrind,
+} from './forecastModel'
 
 export const MACRO_OPTIONS = Array.from({ length: 31 }, (_, index) => String(index + 1))
 export const MICRO_OPTIONS = 'ABCDEFGHI'.split('')
 export const RATING_LABELS = ['Bad', 'Good', 'Great']
+// Validated (light, surface #fffcf7) with the dataviz palette checker. Fixed order.
+// Good is only 2.32:1 against the surface, so text never uses series colours.
 export const RATING_COLORS = {
-  Bad: '#F2AE84',
-  Good: '#F9D949',
-  Great: '#628F47',
+  Bad: '#c0503a',
+  Good: '#d4a017',
+  Great: '#0f8f84',
 }
 export const TARGET_EXTRACTION_LOW = 18
 export const TARGET_EXTRACTION_HIGH = 22
+export const PH_MIN = 3.5
+export const PH_MAX = 8.0
+
+/** Validate a pH form value. Blank is allowed (pH is optional) and never defaulted. */
+export function parsePhInput(value) {
+  const text = value === null || value === undefined ? '' : String(value).trim()
+  if (!text) return { value: null, error: null }
+  const parsed = Number(text)
+  if (!Number.isFinite(parsed)) return { value: null, error: 'pH must be a number' }
+  if (parsed < PH_MIN || parsed > PH_MAX) {
+    return { value: null, error: `pH must be between ${PH_MIN.toFixed(1)} and ${PH_MAX.toFixed(1)}` }
+  }
+  return { value: parsed, error: null }
+}
 
 const SHOTS_COLLECTION = 'shots'
 const CACHE_KEY = 'espresso_dash_cached_shots_v1'
 
-const CONTINENT_COLORS = {
-  Africa: '#6b8f71',
-  Asia: '#d9a441',
-  'North America': '#3b6fb6',
-  'South America': '#c85c3a',
-  Europe: '#7d5ba6',
-  Oceania: '#2a9d8f',
-  Unknown: '#c9c3b8',
-}
+// Only three continents can share a palette that passes every pairwise check, so
+// the top three by shot count get a hue and everything else is a hollow "Other".
+const CONTINENT_PALETTE = ['#2a78d6', '#eb6834', '#1baf7a']
+const OTHER_CONTINENT = 'Other'
+const OTHER_CONTINENT_COLOR = '#a3968a'
 
 const DISPLAY_TO_FIELD = {
   Date: 'date',
@@ -115,23 +135,6 @@ function splitGrindSetting(value) {
   ]
 }
 
-function grindSettingToScore(value) {
-  const text = maybeTrim(value).toUpperCase()
-  const match = text.match(/^(\d{1,2})([A-I])(?:\.5)?$/)
-  if (!match) return null
-  const macro = Number(match[1])
-  const micro = MICRO_OPTIONS.indexOf(match[2])
-  const half = text.endsWith('.5') ? 0.5 : 0
-  return macro * 10 + micro + half
-}
-
-function scoreToGrindSetting(score) {
-  const safe = Math.max(10, Math.round(score))
-  const macro = Math.min(31, Math.max(1, Math.floor(safe / 10)))
-  const microIndex = Math.min(MICRO_OPTIONS.length - 1, Math.max(0, safe - macro * 10))
-  return `${macro}${MICRO_OPTIONS[microIndex]}`
-}
-
 function ratingToLabel(value) {
   if (typeof value === 'string' && RATING_LABELS.includes(value)) return value
   if (value === 2) return 'Great'
@@ -142,6 +145,13 @@ function ratingToLabel(value) {
 function ratingToNumber(value) {
   if (typeof value === 'number') return Math.max(0, Math.min(2, Math.round(value)))
   return Math.max(0, RATING_LABELS.indexOf(value))
+}
+
+// True when the record carries a real rating (number or a known label). Records saved
+// without one read as 0 ("Bad") but must not count as a Bad shot in the forecast model.
+function hasRating(value) {
+  if (typeof value === 'number') return Number.isFinite(value)
+  return RATING_LABELS.includes(value)
 }
 
 function safeDateSort(a, b) {
@@ -223,13 +233,14 @@ function normalizeShot(raw, id) {
     time,
     extraction,
     rating: ratingToNumber(raw.rating ?? raw.Rating ?? raw['Rating Label']),
+    rated: raw.rated === false ? false : hasRating(raw.rating ?? raw.Rating ?? raw['Rating Label']),
     updatedAt: formatDateString(raw.updatedAt) || raw.updatedAt || null,
     createdAt: formatDateString(raw.createdAt) || raw.createdAt || null,
   }
 }
 
 function toFirestoreShot(raw) {
-  return {
+  const shot = {
     date: raw.date,
     spray: raw.spray,
     avgGrind: raw.avgGrind,
@@ -244,7 +255,6 @@ function toFirestoreShot(raw) {
     notes: raw.notes,
     continent: raw.continent,
     brix: raw.brix,
-    ph: raw.ph,
     tempC: raw.tempC,
     adjustmentTemp: raw.adjustmentTemp,
     adjustmentFactor: raw.adjustmentFactor,
@@ -257,6 +267,9 @@ function toFirestoreShot(raw) {
     rating: raw.rating,
     updatedAt: new Date().toISOString(),
   }
+  // pH is optional: leave the key out rather than storing null or a guess.
+  if (raw.ph !== null && raw.ph !== undefined) shot.ph = raw.ph
+  return shot
 }
 
 function cacheShots(shots) {
@@ -264,14 +277,18 @@ function cacheShots(shots) {
     shots,
     lastSyncedAt: new Date().toISOString(),
   }
-  window.localStorage.setItem(CACHE_KEY, JSON.stringify(payload))
+  try {
+    window.localStorage.setItem(CACHE_KEY, JSON.stringify(payload))
+  } catch {
+    // storage full or blocked: still serve the live data
+  }
   return payload
 }
 
 function readCache() {
-  const raw = window.localStorage.getItem(CACHE_KEY)
-  if (!raw) return null
   try {
+    const raw = window.localStorage.getItem(CACHE_KEY)
+    if (!raw) return null
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed.shots)) return null
     return parsed
@@ -280,29 +297,53 @@ function readCache() {
   }
 }
 
-export async function loadShotsData() {
+/** Synchronous read of the last good server snapshot, or null. */
+export function readCachedShots() {
+  const cached = readCache()
+  if (!cached) return null
+  return {
+    shots: cached.shots.map((shot) => normalizeShot(shot, shot.id)),
+    source: 'cache',
+    lastSyncedAt: cached.lastSyncedAt ?? null,
+  }
+}
+
+/**
+ * Fetch from the Firestore server (never the local cache). Rejects on timeout or
+ * when the SDK answers from its own cache; only a real server answer is cached.
+ */
+export async function fetchShotsFromServer({ timeoutMs = 6000 } = {}) {
+  let timer
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Firestore timed out')), timeoutMs)
+  })
   try {
-    const snapshot = await getDocs(collection(db, SHOTS_COLLECTION))
+    const snapshot = await Promise.race([
+      getDocsFromServer(collection(db, SHOTS_COLLECTION)),
+      timeout,
+    ])
+    if (snapshot.metadata?.fromCache) {
+      throw new Error('Firestore returned cached data')
+    }
     const shots = snapshot.docs
       .map((docSnap) => normalizeShot(docSnap.data(), docSnap.id))
       .filter((shot) => shot.date)
       .sort(safeDateSort)
     const cached = cacheShots(shots)
-    return {
-      shots,
-      source: 'firebase',
-      lastSyncedAt: cached.lastSyncedAt,
-    }
+    return { shots, source: 'firebase', lastSyncedAt: cached.lastSyncedAt }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Server first, falling back to the cache. */
+export async function loadShotsData(options) {
+  try {
+    return await fetchShotsFromServer(options)
   } catch (error) {
-    const cached = readCache()
-    if (cached) {
-      return {
-        shots: cached.shots.map((shot) => normalizeShot(shot, shot.id)),
-        source: 'cache',
-        lastSyncedAt: cached.lastSyncedAt,
-      }
-    }
-    throw new Error('Unable to load dashboard data from Firestore and no cached data is available.')
+    const cached = readCachedShots()
+    if (cached) return cached
+    throw new Error(`Unable to load shots: ${error.message}. No cached data is available.`)
   }
 }
 
@@ -339,7 +380,7 @@ function buildDefaults(shots) {
       continent: placeholderText(latest?.continent),
       temp_c: latest?.tempC ?? 28,
       brix: latest?.brix ?? 10,
-      ph: latest?.ph ?? 5.2,
+      ph: '',
       dose: latest?.dose ?? 18,
       yield_grams: latest?.yieldGrams ?? 36,
       shot_time: latest?.time ?? 30,
@@ -518,6 +559,7 @@ export function buildDashboardPayload(shots) {
       average_tds: average(shots.map((shot) => shot.tds)),
       average_extraction: average(shots.map((shot) => shot.extraction)),
       average_rating: average(shots.map((shot) => shot.rating)),
+      last_shot_date: latestShot(shots)?.date ?? null,
     },
     defaults,
     field_options: buildFieldOptions(shots),
@@ -549,6 +591,31 @@ function continentDisplay(shot) {
   return shot.continent || 'Unknown'
 }
 
+/** Top three continents by shot count get a hue; everything else collapses to "Other". */
+function buildContinentScheme(shots) {
+  const counts = new Map()
+  shots.forEach((shot) => {
+    if (shot.continent) counts.set(shot.continent, (counts.get(shot.continent) || 0) + 1)
+  })
+  const ranked = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name]) => name)
+  const top = ranked.slice(0, CONTINENT_PALETTE.length)
+  const colors = {}
+  top.forEach((name, index) => { colors[name] = CONTINENT_PALETTE[index] })
+  const hasOther = shots.some((shot) => !top.includes(shot.continent))
+  const order = [...top]
+  if (hasOther) {
+    order.push(OTHER_CONTINENT)
+    colors[OTHER_CONTINENT] = OTHER_CONTINENT_COLOR
+  }
+  return {
+    colors,
+    order,
+    bucket: (shot) => (top.includes(shot.continent) ? shot.continent : OTHER_CONTINENT),
+  }
+}
+
 export function buildOriginsPayload(shots, filters) {
   let filtered = [...shots]
   if (filters.selected_roasters?.length) {
@@ -567,6 +634,7 @@ export function buildOriginsPayload(shots, filters) {
     filtered = filtered.filter((shot) => shot.continent)
   }
 
+  const scheme = buildContinentScheme(shots)
   const withCoords = filtered.filter((shot) => Number.isFinite(shot.lat) && Number.isFinite(shot.long))
   return {
     options: {
@@ -580,7 +648,8 @@ export function buildOriginsPayload(shots, filters) {
       long: shot.long,
       roaster: shot.roaster || null,
       region: shot.region || null,
-      continent: continentDisplay(shot),
+      continent: scheme.bucket(shot),
+      continent_name: continentDisplay(shot),
       extraction: shot.extraction,
       tds: shot.tds,
       dose: shot.dose,
@@ -595,7 +664,9 @@ export function buildOriginsPayload(shots, filters) {
       .map((shot) => ({
         __row_id: shot.id,
         Roaster: shot.roaster || null,
-        'Continent Display': continentDisplay(shot),
+        'Continent Display': scheme.bucket(shot),
+        Continent: continentDisplay(shot),
+        'Rating Label': ratingToLabel(shot.rating),
         Region: shot.region || null,
         Variety: shot.variety || null,
         'Processing Technique': shot.processingTechnique || null,
@@ -633,7 +704,8 @@ export function buildOriginsPayload(shots, filters) {
         Extraction: shot.extraction,
         'Rating Label': ratingToLabel(shot.rating),
       })),
-    continent_colors: CONTINENT_COLORS,
+    continent_colors: scheme.colors,
+    continent_order: scheme.order,
   }
 }
 
@@ -648,7 +720,7 @@ function buildExperimentContext(form, shots) {
     roast: maybeTrim(form?.roast) || defaults.roast,
     tempC: toNumber(form?.temp_c) ?? defaults.temp_c,
     brix: toNumber(form?.brix) ?? defaults.brix,
-    ph: toNumber(form?.ph) ?? defaults.ph,
+    ph: toNumber(form?.ph),
     dose: toNumber(form?.dose) ?? defaults.dose,
     yieldGrams: toNumber(form?.yield_grams) ?? defaults.yield_grams,
     time: toNumber(form?.shot_time) ?? defaults.shot_time,
@@ -711,39 +783,11 @@ function enrichExperimentShots(shots) {
   }))
 }
 
-function linearSlope(shots) {
-  const points = shots.filter((shot) => Number.isFinite(shot.grindScore) && Number.isFinite(shot.extraction))
-  if (points.length < 2) return -0.03
-  const meanX = average(points.map((point) => point.grindScore), 0)
-  const meanY = average(points.map((point) => point.extraction), 0)
-  let numerator = 0
-  let denominator = 0
-  points.forEach((point) => {
-    numerator += (point.grindScore - meanX) * (point.extraction - meanY)
-    denominator += (point.grindScore - meanX) ** 2
-  })
-  if (!denominator) return -0.03
-  return numerator / denominator
-}
-
-function ratingProbabilities(similar) {
-  const total = similar.reduce((sum, item) => sum + item.weight, 0) || 1
-  const lookup = { 0: 0, 1: 0, 2: 0 }
-  similar.forEach((item) => {
-    lookup[item.shot.rating] += item.weight
-  })
-  return {
-    bad: lookup[0] / total,
-    good: lookup[1] / total,
-    great: lookup[2] / total,
-  }
-}
-
 function coffeeLabel(shot) {
   return [shot.roaster, shot.region, shot.variety].filter(Boolean).join(' • ') || shot.roaster || 'Unknown Coffee'
 }
 
-export function buildExperimentPayload(shots, form = {}) {
+export function buildExperimentPayload(shots, form = {}, { calibration = null } = {}) {
   const enriched = enrichExperimentShots(shots)
   if (enriched.length < 8) {
     return {
@@ -762,32 +806,41 @@ export function buildExperimentPayload(shots, form = {}) {
     .sort((a, b) => b.weight - a.weight)
     .slice(0, 12)
 
-  const extraction = similar.length
-    ? similar.reduce((sum, item) => sum + (item.shot.extraction ?? 0) * item.weight, 0) / similar.reduce((sum, item) => sum + item.weight, 0)
-    : average(enriched.map((shot) => shot.extraction), 20)
-  const probabilities = ratingProbabilities(similar)
-  const predictedRating = probabilities.great >= Math.max(probabilities.good, probabilities.bad)
-    ? 'Great'
-    : (probabilities.good >= probabilities.bad ? 'Good' : 'Bad')
+  const model = buildForecastModel(shots, { calibration })
+  if (!model.available) {
+    return {
+      available: false,
+      message: model.reason,
+      defaults: buildDefaults(enriched).latest_values,
+    }
+  }
+  const planned = {
+    coffee: coffeeKey(context),
+    grindSetting: context.grindSetting,
+    dose: context.dose,
+    yieldGrams: context.yieldGrams,
+    ph: context.ph,
+  }
+  const result = forecast(model, planned)
+
+  // forecast() is non-null whenever the model is available (checked above).
+  const extraction = result.extraction
+  const probabilities = result.probabilities
+  const predictedRating = result.ratingLabel
   const noveltyScore = similar.length ? Math.max(0, 1 - (similar[0].weight / 20)) : 1
   const noveltyFlag = noveltyScore > 0.45
 
-  const slope = linearSlope(similar.map((item) => item.shot))
-  const baseGrindScore = context.grindScore ?? average(enriched.map((shot) => shot.grindScore), 100)
-  const sweep = Array.from({ length: 13 }, (_, index) => baseGrindScore - 6 + index)
-    .map((score) => {
-      const predictedExtraction = extraction + slope * (score - baseGrindScore)
-      const targetDistance = Math.abs(predictedExtraction - 20)
-      const greatProbability = Math.max(0.02, probabilities.great + (2.2 - targetDistance) * 0.05)
-      const goodProbability = Math.max(0.05, probabilities.good + (2.8 - targetDistance) * 0.04)
-      return {
-        'Grind Score': round(score, 1),
-        'Grind Setting': scoreToGrindSetting(score),
-        'Predicted Extraction': round(predictedExtraction, 2),
-        'Great Probability': Math.min(0.98, greatProbability),
-        'Good Probability': Math.min(0.98, goodProbability),
-      }
-    })
+  const sweep = sweepGrind(model, planned, { span: 6 }).map((row) => ({
+    'Grind Index': row.index,
+    'Grind Score': grindSettingToScore(row.setting),
+    'Grind Setting': row.setting,
+    'Grind µm (est.)': row.um === null ? null : round(row.um, 0),
+    'Predicted Extraction': round(row.extraction, 2),
+    Low: row.low === null ? null : round(row.low, 2),
+    High: row.high === null ? null : round(row.high, 2),
+    'Great Probability': row.great,
+    'Good Probability': row.good,
+  }))
 
   const bestCandidates = [...sweep]
     .sort((a, b) => (
@@ -795,13 +848,7 @@ export function buildExperimentPayload(shots, form = {}) {
       || b['Great Probability'] - a['Great Probability']
     ))
     .slice(0, 8)
-    .map((row) => ({
-      'Grind Setting': row['Grind Setting'],
-      'Grind Score': row['Grind Score'],
-      'Predicted Extraction': row['Predicted Extraction'],
-      'Great Probability': row['Great Probability'],
-      'Good Probability': row['Good Probability'],
-    }))
+    .map(({ 'Grind Score': _score, ...row }) => row)
 
   const successRows = similar
     .filter((item) => item.shot.rating >= 1 && item.shot.extraction >= TARGET_EXTRACTION_LOW && item.shot.extraction <= TARGET_EXTRACTION_HIGH)
@@ -843,12 +890,21 @@ export function buildExperimentPayload(shots, form = {}) {
     ph: context.ph,
     metrics: {
       rows: enriched.length,
-      extraction_r2: round(Math.max(0.2, 0.65 - noveltyScore * 0.3), 2),
-      extraction_mae: round(Math.max(0.2, 1.8 + noveltyScore), 2),
-      rating_balanced_accuracy: round(Math.max(0.35, 0.72 - noveltyScore * 0.2), 2),
+      backtest: model.backtest
+        ? {
+          mae: round(model.backtest.model.mae, 2),
+          baselineMae: round(model.backtest.baseline.mae, 2),
+          within1: round(model.backtest.model.within1, 3),
+          evaluated: model.backtest.evaluated,
+        }
+        : null,
     },
     prediction: {
       extraction: round(extraction, 2),
+      low: result.low === null ? null : round(result.low, 2),
+      high: result.high === null ? null : round(result.high, 2),
+      interval: result.interval,
+      features_used: result.featuresUsed,
       predicted_rating_label: predictedRating,
       great_probability: probabilities.great,
       good_probability: probabilities.good,
@@ -890,7 +946,9 @@ export async function addShotToFirestore({ shots, fields, carryForward, carrySho
   const dose = toNumber(fields.dose) ?? defaults.dose
   const yieldGrams = toNumber(fields.yield_grams) ?? defaults.yield_grams
   const time = toNumber(fields.shot_time) ?? defaults.shot_time
-  const ph = toNumber(fields.ph)
+  const phResult = parsePhInput(fields.ph)
+  if (phResult.error) throw new Error(phResult.error)
+  const ph = phResult.value
   const adjustment = calculateAdjustmentFactor(tempC)
   const tds = round(calculateTds(brix, adjustment.factor), 2)
   const extraction = round(calculateExtraction(tds, yieldGrams, dose), 2)
@@ -949,9 +1007,13 @@ export async function updateShotCellInFirestore({ shots, rowId, column, value })
   } else if (field === 'rating') {
     if (!RATING_LABELS.includes(text)) throw new Error('Rating Label must be Bad, Good, or Great.')
     next.rating = ratingToNumber(text)
-  } else if (['dose', 'yieldGrams', 'time', 'brix', 'ph', 'tempC', 'tds', 'extraction'].includes(field)) {
+  } else if (field === 'ph') {
+    const phResult = parsePhInput(text)
+    if (phResult.error) throw new Error(phResult.error)
+    next.ph = phResult.value
+  } else if (['dose', 'yieldGrams', 'time', 'brix', 'tempC', 'tds', 'extraction'].includes(field)) {
     const numeric = toNumber(text)
-    if (numeric === null && !['ph', 'tds', 'extraction'].includes(field)) {
+    if (numeric === null && !['tds', 'extraction'].includes(field)) {
       throw new Error(`${column} must be numeric.`)
     }
     next[field] = numeric
@@ -971,5 +1033,8 @@ export async function updateShotCellInFirestore({ shots, rowId, column, value })
     }
   }
 
-  await updateDoc(doc(db, SHOTS_COLLECTION, rowId), toFirestoreShot(next))
+  const payload = toFirestoreShot(next)
+  // A blank pH removes the stored value instead of leaving the old one in place.
+  if (field === 'ph' && (next.ph === null || next.ph === undefined)) payload.ph = deleteField()
+  await updateDoc(doc(db, SHOTS_COLLECTION, rowId), payload)
 }

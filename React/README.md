@@ -1,53 +1,29 @@
-# Coffee Grind Size Analyzer — React App
+# Espresso Lab - React frontend
 
-Full interactive canvas experience: scroll to zoom, drag to pan, click to place points — no page refresh ever.
-
-## Structure
-
-```
-React/
-  backend/   FastAPI — wraps the existing coffeegrindsize_core Python library
-  frontend/  Vite + React — all UI and canvas interaction
-```
-
-## Run it
-
-### 1. Backend
+This folder holds the React app (`frontend/`). The API it talks to is the FastAPI service in `../cloudrun/`; setup, architecture, deployment and testing are documented in the [root README](../README.md).
 
 ```bash
-cd React/backend
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+cd frontend
+cp .env.example .env.local
+npm ci
+npm run dev            # http://localhost:5173, /api proxied to localhost:8000
+npm run build          # production bundle in dist/
+npm run test:e2e       # Playwright, see root README
 ```
 
-### 2. Frontend (separate terminal)
+## Analyzer canvas
 
-```bash
-cd React/frontend
-npm install
-npm run dev
-```
+`ImageCanvas.jsx` draws everything on one `<canvas>`:
 
-Open http://localhost:5173
-
----
-
-## How the canvas works
-
-`ImageCanvas.jsx` draws everything on a single `<canvas>` element:
-
-- **Scroll wheel / trackpad pinch** → zoom toward cursor
-- **Click + drag** → pan (as long as you move more than 3px before releasing)
-- **Click (no drag)** → place a point in the current mode
-- **Fit button** (top-right of canvas) → resets zoom to fit the image
-
-All coordinate math converts between canvas pixels and original-image pixels using the current zoom and pan offset, so placed points are always accurate regardless of zoom level.
+- scroll wheel or pinch zooms toward the cursor; drag pans (a click that moves more than a few pixels is a pan, not a point)
+- a click places a point for the current mode; all points are stored in original-image pixels regardless of zoom
+- keyboard: `1` scale, `2` region, `4` clean up, `Enter` detect / apply erase, `Z` or Backspace undo, `Esc` clear, `V` or Space view
 
 ## Workflow
 
-1. Upload an image
-2. **Mode: 1 · Reference** — click 2 points on a reference object (coin, ruler). Select the preset or type the physical size in mm on the sidebar.
-3. **Mode: 2 · Region** — click polygon boundary points around the area you want to analyze. Leave empty to analyze the full image.
-4. Click **3 · Run Particle Detection**
-5. **Mode: 4 · Erase** — click near bad clusters, set the erase radius, press **Apply Erase**
-6. Click **Show Histogram** for the particle size distribution
+1. Upload a photo.
+2. **Scale**: click two edges of a reference object (default US quarter, 24.26 mm) or choose another preset.
+3. **Region** (optional): outline the area to analyze; leave empty for the whole image.
+4. **Detect**.
+5. **Clean up**: click stray clusters and apply to remove them.
+6. Read the results, save runs (up to 3) and compare them, or download the CSV/histogram.

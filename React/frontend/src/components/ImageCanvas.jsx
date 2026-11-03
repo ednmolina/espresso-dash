@@ -19,8 +19,16 @@ const PINCH_MIN_DISTANCE = 8
  *   erasePoints     – [{x, y}, ...] in original image coords
  *   eraseRadius     – radius in original image pixels
  *   onPointAdded    – (x, y) => void  called with original-image coords on click
- *   overlayB64      – optional base64 PNG to show instead of the original image
+ *   layerB64        – optional transparent base64 PNG drawn over the image
+ *   pixelScale      – px per mm once the coin is measured (for the guide label)
+ *   referenceMm     – physical size of the reference object
+ *   onEraseRadiusChange – (r) => void  ([ and ] keys)
+ *   onPolygonClose  – () => void  user clicked the first region point to close
  */
+
+// Canvas drawing needs real colour strings (not CSS variables).
+const COLORS = { scale: '#e5484d', region: '#2fa89a', clean: '#f08c2e' }
+const HUD_FLASH_MS = 1200
 export default function ImageCanvas({
   imageSrc,
   imageWidth,
@@ -31,7 +39,11 @@ export default function ImageCanvas({
   erasePoints = [],
   eraseRadius = 20,
   onPointAdded,
-  overlayB64,
+  layerB64,
+  pixelScale = null,
+  referenceMm = 0,
+  onEraseRadiusChange,
+  onPolygonClose,
 }) {
   const canvasRef = useRef(null)
   const imgRef = useRef(null)
@@ -39,7 +51,15 @@ export default function ImageCanvas({
 
   // Viewport state: zoom level and pan offset (canvas pixels)
   const viewRef = useRef({ zoom: 1, panX: 0, panY: 0 })
+  // Canvas size in CSS pixels; the backing store is scaled by devicePixelRatio.
+  const sizeRef = useRef({ width: 0, height: 0, dpr: 1 })
   const [, forceRedraw] = useState(0)
+  const [zoomPct, setZoomPct] = useState(100)
+  const [brushFlash, setBrushFlash] = useState(false)
+  const hoverRef = useRef(null) // pointer position in canvas px, or null
+  const fitZoomRef = useRef(1)
+  const rafRef = useRef(0)
+  const flashTimerRef = useRef(0)
 
   // Pointer gesture state
   const pointersRef = useRef(new Map())
@@ -70,6 +90,17 @@ export default function ImageCanvas({
     forceRedraw(n => n + 1)
   }, [])
 
+  const zoomAboutCentre = useCallback((factor) => {
+    const { width: W, height: H } = sizeRef.current
+    zoomAroundPoint(W / 2, H / 2, factor)
+  }, [zoomAroundPoint])
+
+  const setZoomOneToOne = useCallback(() => {
+    const { width: W, height: H } = sizeRef.current
+    const { zoom } = viewRef.current
+    zoomAroundPoint(W / 2, H / 2, 1 / zoom)
+  }, [zoomAroundPoint])
+
   const updatePinchView = useCallback((center, anchorImage, zoom) => {
     viewRef.current = {
       zoom,
@@ -88,39 +119,85 @@ export default function ImageCanvas({
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     const { zoom, panX, panY } = viewRef.current
-    const W = canvas.width
-    const H = canvas.height
+    const { width: W, height: H, dpr } = sizeRef.current
 
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, W, H)
     ctx.save()
     ctx.translate(panX, panY)
     ctx.scale(zoom, zoom)
 
-    // Draw image (overlay takes priority if provided)
-    const img = overlayImgRef.current || imgRef.current
+    const img = imgRef.current
     if (img && img.complete) {
+      ctx.imageSmoothingEnabled = zoom < 1
       ctx.drawImage(img, 0, 0, imageWidth, imageHeight)
+    }
+    // Overlay layer: keep its pixels crisp when zoomed in.
+    const layer = overlayImgRef.current
+    if (layer && layer.complete) {
+      ctx.imageSmoothingEnabled = false
+      ctx.drawImage(layer, 0, 0, imageWidth, imageHeight)
     }
 
     ctx.restore()
 
     // Draw overlays in canvas space (so points stay crisp at any zoom)
-    _drawReferencePoints(ctx)
     _drawPolygon(ctx)
+    _drawReferencePoints(ctx)
     _drawErasePoints(ctx)
-  }, [imageWidth, imageHeight, referencePoints, polygonPoints, erasePoints, eraseRadius, mode])
+    _drawBrushPreview(ctx)
+  }, [imageWidth, imageHeight, referencePoints, polygonPoints, erasePoints, eraseRadius, mode, pixelScale, referenceMm])
+
+  function _coinGuide(ctx, p1, p2, live) {
+    const cx = (p1.x + p2.x) / 2
+    const cy = (p1.y + p2.y) / 2
+    const r = Math.hypot(p2.x - p1.x, p2.y - p1.y) / 2
+    if (r < 2) return
+    ctx.save()
+    ctx.strokeStyle = COLORS.scale
+    ctx.lineWidth = 1.5
+    ctx.setLineDash(live ? [6, 4] : [])
+    ctx.beginPath()
+    ctx.arc(cx, cy, r, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.beginPath()
+    ctx.moveTo(p1.x, p1.y)
+    ctx.lineTo(p2.x, p2.y)
+    ctx.lineWidth = live ? 1 : 2
+    ctx.globalAlpha = live ? 0.6 : 1
+    ctx.stroke()
+    ctx.restore()
+
+    if (!live && pixelScale) {
+      const text = `${referenceMm} mm · ${pixelScale.toFixed(1)} px/mm`
+      ctx.save()
+      ctx.font = '600 12px Inter, sans-serif'
+      const w = ctx.measureText(text).width + 16
+      ctx.fillStyle = 'rgba(18,14,11,0.85)'
+      ctx.strokeStyle = COLORS.scale
+      ctx.lineWidth = 1
+      const ly = w < r * 2 - 28 ? cy : cy + r + 18
+      ctx.beginPath()
+      ctx.roundRect(cx - w / 2, ly - 11, w, 22, 11)
+      ctx.fill()
+      ctx.stroke()
+      ctx.fillStyle = '#f1e8de'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(text, cx, ly + 0.5)
+      ctx.restore()
+    }
+  }
 
   function _drawReferencePoints(ctx) {
     if (!referencePoints.length) return
     const pts = referencePoints.map(({ x, y }) => imageToCanvas(x, y))
 
     if (pts.length === 2) {
-      ctx.beginPath()
-      ctx.moveTo(pts[0].x, pts[0].y)
-      ctx.lineTo(pts[1].x, pts[1].y)
-      ctx.strokeStyle = '#e63946'
-      ctx.lineWidth = 2
-      ctx.stroke()
+      _coinGuide(ctx, pts[0], pts[1], false)
+    } else if (pts.length === 1 && mode === 'reference' && hoverRef.current) {
+      _coinGuide(ctx, pts[0], hoverRef.current, true)
     }
 
     pts.forEach(({ x, y }, i) => {
@@ -132,32 +209,61 @@ export default function ImageCanvas({
       ctx.lineWidth = 1.5
       ctx.stroke()
 
-      ctx.fillStyle = '#fff'
+      ctx.fillStyle = '#111'
       ctx.font = 'bold 10px sans-serif'
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
-      ctx.fillText(i + 1, x, y)
+      ctx.fillText(i + 1, x, y + 0.5)
     })
   }
 
   function _drawPolygon(ctx) {
     if (!polygonPoints.length) return
     const pts = polygonPoints.map(({ x, y }) => imageToCanvas(x, y))
+    const editing = mode === 'polygon'
+    const hover = editing ? hoverRef.current : null
 
+    if (pts.length >= 3) {
+      ctx.beginPath()
+      ctx.moveTo(pts[0].x, pts[0].y)
+      pts.slice(1).forEach(({ x, y }) => ctx.lineTo(x, y))
+      ctx.closePath()
+      ctx.fillStyle = 'rgba(47, 168, 154, 0.08)'
+      ctx.fill()
+    }
+
+    ctx.strokeStyle = COLORS.region
+    ctx.lineWidth = 2
+    ctx.setLineDash([6, 3])
     ctx.beginPath()
     ctx.moveTo(pts[0].x, pts[0].y)
     pts.slice(1).forEach(({ x, y }) => ctx.lineTo(x, y))
-    if (pts.length >= 3) ctx.closePath()
-    ctx.strokeStyle = '#2a9d8f'
-    ctx.lineWidth = 2
-    ctx.setLineDash([6, 3])
+    if (pts.length >= 3 && !editing) ctx.closePath()
     ctx.stroke()
+
+    if (editing) {
+      const last = pts[pts.length - 1]
+      ctx.globalAlpha = 0.4
+      if (hover) {
+        ctx.beginPath()
+        ctx.moveTo(last.x, last.y)
+        ctx.lineTo(hover.x, hover.y)
+        ctx.stroke()
+      }
+      if (pts.length >= 3) {
+        ctx.beginPath()
+        ctx.moveTo(hover ? hover.x : last.x, hover ? hover.y : last.y)
+        ctx.lineTo(pts[0].x, pts[0].y)
+        ctx.stroke()
+      }
+      ctx.globalAlpha = 1
+    }
     ctx.setLineDash([])
 
-    pts.forEach(({ x, y }) => {
+    pts.forEach(({ x, y }, i) => {
       ctx.beginPath()
-      ctx.arc(x, y, POINT_RADIUS, 0, Math.PI * 2)
-      ctx.fillStyle = '#2a9d8f'
+      ctx.arc(x, y, i === 0 && editing && pts.length >= 3 ? POINT_RADIUS + 2 : POINT_RADIUS, 0, Math.PI * 2)
+      ctx.fillStyle = COLORS.region
       ctx.fill()
       ctx.strokeStyle = '#083d3a'
       ctx.lineWidth = 1.5
@@ -190,6 +296,24 @@ export default function ImageCanvas({
     })
   }
 
+  function _drawBrushPreview(ctx) {
+    const hover = hoverRef.current
+    if (mode !== 'erase' || !hover) return
+    const r = eraseRadius * viewRef.current.zoom
+    ctx.save()
+    ctx.lineWidth = 3
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)'
+    ctx.beginPath()
+    ctx.arc(hover.x, hover.y, r + 0.5, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.lineWidth = 1
+    ctx.strokeStyle = '#fff'
+    ctx.beginPath()
+    ctx.arc(hover.x, hover.y, r, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.restore()
+  }
+
   // -------------------------------------------------------------------------
   // Fit image to canvas on first load
   // -------------------------------------------------------------------------
@@ -197,11 +321,13 @@ export default function ImageCanvas({
   const fitToCanvas = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas || !imageWidth || !imageHeight) return
-    const scaleX = canvas.width / imageWidth
-    const scaleY = canvas.height / imageHeight
+    const { width: W, height: H } = sizeRef.current
+    const scaleX = W / imageWidth
+    const scaleY = H / imageHeight
     const zoom = Math.min(scaleX, scaleY, 1) // never upscale by default
-    const panX = (canvas.width - imageWidth * zoom) / 2
-    const panY = (canvas.height - imageHeight * zoom) / 2
+    const panX = (W - imageWidth * zoom) / 2
+    const panY = (H - imageHeight * zoom) / 2
+    fitZoomRef.current = zoom
     viewRef.current = { zoom, panX, panY }
     forceRedraw(n => n + 1)
   }, [imageWidth, imageHeight])
@@ -221,7 +347,7 @@ export default function ImageCanvas({
   }, [imageSrc, fitToCanvas])
 
   useEffect(() => {
-    if (!overlayB64) {
+    if (!layerB64) {
       overlayImgRef.current = null
       forceRedraw(n => n + 1)
       return
@@ -231,11 +357,15 @@ export default function ImageCanvas({
       overlayImgRef.current = img
       forceRedraw(n => n + 1)
     }
-    img.src = `data:image/png;base64,${overlayB64}`
-  }, [overlayB64])
+    img.src = `data:image/png;base64,${layerB64}`
+  }, [layerB64])
 
   // Redraw whenever anything changes
-  useEffect(() => { draw() })
+  useEffect(() => {
+    draw()
+    const pct = Math.round(viewRef.current.zoom * 100)
+    setZoomPct((prev) => (prev === pct ? prev : pct))
+  })
 
   // -------------------------------------------------------------------------
   // Resize canvas to fill its container
@@ -246,8 +376,10 @@ export default function ImageCanvas({
     if (!canvas) return
     const ro = new ResizeObserver(() => {
       const rect = canvas.parentElement.getBoundingClientRect()
-      canvas.width = rect.width
-      canvas.height = rect.height
+      const dpr = window.devicePixelRatio || 1
+      sizeRef.current = { width: rect.width, height: rect.height, dpr }
+      canvas.width = Math.round(rect.width * dpr)
+      canvas.height = Math.round(rect.height * dpr)
       fitToCanvas()
     })
     ro.observe(canvas.parentElement)
@@ -338,10 +470,26 @@ export default function ImageCanvas({
     }
   }, [beginPinchGesture, beginSinglePointerGesture, getCanvasPoint])
 
+  const requestPreviewRedraw = useCallback(() => {
+    if (rafRef.current) return
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0
+      forceRedraw(n => n + 1)
+    })
+  }, [])
+
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
+
   const onPointerMove = useCallback((event) => {
-    if (!pointersRef.current.has(event.pointerId)) return
     const point = getCanvasPoint(event)
     if (!point) return
+    if (event.pointerType !== 'touch') {
+      hoverRef.current = point
+      if (mode === 'erase' || (mode === 'reference' && referencePoints.length === 1) || (mode === 'polygon' && polygonPoints.length)) {
+        requestPreviewRedraw()
+      }
+    }
+    if (!pointersRef.current.has(event.pointerId)) return
 
     pointersRef.current.set(event.pointerId, point)
     const gesture = gestureRef.current
@@ -375,7 +523,7 @@ export default function ImageCanvas({
       viewRef.current.panY = gesture.panY + dy
       forceRedraw(n => n + 1)
     }
-  }, [getCanvasPoint, getTrackedPointers, updatePinchView])
+  }, [getCanvasPoint, getTrackedPointers, updatePinchView, mode, referencePoints.length, polygonPoints.length, requestPreviewRedraw])
 
   const finishPointer = useCallback((event) => {
     const point = pointersRef.current.get(event.pointerId)
@@ -387,7 +535,11 @@ export default function ImageCanvas({
       const { x, y } = canvasToImage(point.x, point.y)
       const ix = Math.max(0, Math.min(imageWidth, x))
       const iy = Math.max(0, Math.min(imageHeight, y))
-      onPointAdded?.(ix, iy)
+      const first = polygonPoints[0]
+      const nearFirst = mode === 'polygon' && polygonPoints.length >= 3 && first &&
+        Math.hypot(imageToCanvas(first.x, first.y).x - point.x, imageToCanvas(first.x, first.y).y - point.y) < 10
+      if (nearFirst) onPolygonClose?.()
+      else onPointAdded?.(ix, iy)
     }
 
     if (pointersRef.current.size >= 2) {
@@ -402,13 +554,58 @@ export default function ImageCanvas({
     }
 
     gestureRef.current = { type: 'idle', moved: false }
-  }, [beginPinchGesture, beginSinglePointerGesture, canvasToImage, getTrackedPointers, imageHeight, imageWidth, mode, onPointAdded])
+  }, [beginPinchGesture, beginSinglePointerGesture, canvasToImage, imageToCanvas, getTrackedPointers, imageHeight, imageWidth, mode, onPointAdded, onPolygonClose, polygonPoints])
 
   // -------------------------------------------------------------------------
   // Cursor style
   // -------------------------------------------------------------------------
 
-  const cursor = mode === 'view' ? 'grab' : 'crosshair'
+  const cursor = mode === 'view' ? 'grab' : mode === 'erase' ? 'none' : 'crosshair'
+
+  // -------------------------------------------------------------------------
+  // Keyboard: zoom, brush size, arrow-key panning
+  // -------------------------------------------------------------------------
+
+  const flashBrush = useCallback(() => {
+    setBrushFlash(true)
+    clearTimeout(flashTimerRef.current)
+    flashTimerRef.current = setTimeout(() => setBrushFlash(false), HUD_FLASH_MS)
+  }, [])
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const t = e.target
+      if (t instanceof HTMLElement && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName))) return
+      if (e.key === '=' || e.key === '+') { e.preventDefault(); zoomAboutCentre(1.25) }
+      else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomAboutCentre(0.8) }
+      else if (e.key === '0') { e.preventDefault(); fitToCanvas() }
+      else if (e.shiftKey && e.code === 'Digit1') { e.preventDefault(); setZoomOneToOne() }
+      else if ((e.key === '[' || e.key === ']') && onEraseRadiusChange) {
+        e.preventDefault()
+        onEraseRadiusChange(Math.max(2, Math.min(500, eraseRadius + (e.key === ']' ? 5 : -5))))
+        flashBrush()
+      } else if (e.target === canvasRef.current && e.key.startsWith('Arrow')) {
+        e.preventDefault()
+        const d = 40
+        const v = viewRef.current
+        if (e.key === 'ArrowLeft') v.panX += d
+        if (e.key === 'ArrowRight') v.panX -= d
+        if (e.key === 'ArrowUp') v.panY += d
+        if (e.key === 'ArrowDown') v.panY -= d
+        forceRedraw(n => n + 1)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [zoomAboutCentre, fitToCanvas, setZoomOneToOne, onEraseRadiusChange, eraseRadius, flashBrush])
+
+  const modeLabel = {
+    reference: 'Click the two edges of the reference coin',
+    polygon: 'Click points to outline the grounds region',
+    erase: 'Click stray clusters to mark them for removal',
+    view: 'Pan and zoom the photo',
+  }[mode]
 
   // -------------------------------------------------------------------------
   // Render
@@ -418,25 +615,25 @@ export default function ImageCanvas({
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <canvas
         ref={canvasRef}
+        role="img"
+        tabIndex={0}
+        aria-label={`Photo of grounds. ${modeLabel}. Arrow keys pan, plus and minus zoom.`}
         style={{ display: 'block', width: '100%', height: '100%', cursor, touchAction: 'none' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
+        onPointerLeave={() => { hoverRef.current = null; requestPreviewRedraw() }}
         onPointerUp={finishPointer}
         onPointerCancel={finishPointer}
       />
-      <button
-        onClick={fitToCanvas}
-        title="Reset zoom to fit"
-        style={{
-          position: 'absolute', top: 8, right: 8,
-          padding: '4px 8px', fontSize: 12,
-          background: 'rgba(0,0,0,0.55)', color: '#fff',
-          border: '1px solid rgba(255,255,255,0.2)', borderRadius: 4,
-          cursor: 'pointer',
-        }}
-      >
-        Fit
-      </button>
+      {brushFlash && mode === 'erase' && <div className="brush-flash" role="status">Brush {eraseRadius} px</div>}
+      <div className="canvas-hud hud-zoom" role="group" aria-label="Zoom">
+        <button type="button" aria-label="Zoom out" title="Zoom out (−)" onClick={() => zoomAboutCentre(0.8)}>−</button>
+        <button type="button" className="hud-pct" title="Reset to fit (0)" onClick={fitToCanvas}>{zoomPct}%</button>
+        <button type="button" aria-label="Zoom in" title="Zoom in (+)" onClick={() => zoomAboutCentre(1.25)}>+</button>
+        <span className="hud-sep" aria-hidden="true" />
+        <button type="button" className="hud-fit" title="Fit image (0)" onClick={fitToCanvas}>Fit</button>
+        <button type="button" className="hud-one" title="Actual pixels (Shift+1)" onClick={setZoomOneToOne}>1:1</button>
+      </div>
     </div>
   )
 }

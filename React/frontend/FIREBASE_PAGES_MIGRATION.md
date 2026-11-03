@@ -1,28 +1,11 @@
-# Firebase / Pages Migration Notes
+# Firebase / Pages migration - completed
 
-The React frontend now includes:
+The migration is done. The app is a static React build on GitHub Pages, authenticated with Firebase Auth (Google sign-in, single allow-listed e-mail), with shots in Firestore and the particle analyzer served by a FastAPI service on Cloud Run.
 
-- GitHub Pages build/deploy scaffolding
-- Firebase Auth Google sign-in
-- single-email allowlist gating at app startup
-- environment-based Firebase configuration
-- Firestore-backed dashboard reads/writes with localStorage cache fallback
+Everything that used to be described here (secrets, deployment, backend setup) now lives in the root [README](../../README.md), sections "Architecture" and "Deployment".
 
-Current blocker for a full GitHub Pages migration:
+Quick reference, GitHub Actions secrets used by `.github/workflows/deploy-pages.yml`:
 
-- `AnalyzerApp` still depends on the Python `/api/upload`, `/api/analyze`, `/api/erase`, and `/api/histogram` endpoints.
-
-Implication:
-
-- GitHub Pages can host the dashboard shell and Firebase-authenticated dashboard flow.
-- The particle analyzer still requires a separate backend until those API-dependent paths are replaced or moved to another hosted runtime.
-
-Required GitHub Actions secrets:
-
-- `VITE_FIREBASE_API_KEY`
-- `VITE_FIREBASE_AUTH_DOMAIN`
-- `VITE_FIREBASE_PROJECT_ID`
-- `VITE_FIREBASE_STORAGE_BUCKET`
-- `VITE_FIREBASE_MESSAGING_SENDER_ID`
-- `VITE_FIREBASE_APP_ID`
+- `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_STORAGE_BUCKET`, `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_APP_ID`
 - `VITE_ALLOWED_EMAIL`
+- `VITE_API_BASE` (Cloud Run service URL)
