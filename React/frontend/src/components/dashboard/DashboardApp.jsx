@@ -13,7 +13,8 @@ import {
   parsePhInput,
   updateShotCellInFirestore,
 } from '../../dashboardData'
-import { coffeeKey, coffeeLabel, forecast, suggestGrind } from '../../forecastModel'
+import { coffeeKey, coffeeLabel, forecast, suggestWithTarget } from '../../forecastModel'
+import { useGrindTargetMode } from '../../grindTargetPref'
 import { useNav } from '../../navigation'
 import { useShots } from '../../shotsStore'
 import { useForecastModel, useGrindCalibration } from '../../useModels'
@@ -218,6 +219,7 @@ export default function DashboardApp() {
   const cal = useGrindCalibration(shots)
   const model = useForecastModel(shots, cal.mean)
   const { estimate } = cal
+  const [grindTargetMode] = useGrindTargetMode()
 
   const dashboard = useMemo(() => (shots ? buildDashboardPayload(shots) : null), [shots])
   const origins = useMemo(() => (shots ? buildOriginsPayload(shots, originsFilters) : null), [shots, originsFilters])
@@ -256,15 +258,16 @@ export default function DashboardApp() {
       yieldGrams: latest.yieldGrams,
     }
     const result = forecast(model, planned)
-    const suggestion = suggestGrind(model, planned, 20)
+    const { suggestion, target } = suggestWithTarget(model, shots ?? [], planned, grindTargetMode)
     const size = suggestion ? estimate(suggestion.setting) : null
     return {
       planned,
       result,
       suggestion,
+      target,
       suggestionUm: size && size.kind === 'curve' ? size.um : null,
     }
-  }, [latest, model, estimate])
+  }, [latest, model, estimate, shots, grindTargetMode])
 
   const preview = (() => {
     const { adjustedTemp, factor } = calculateAdjustmentFactor(Number(shotForm.temp_c || 0))
@@ -480,6 +483,10 @@ export default function DashboardApp() {
   const suggestionText = next?.suggestion
     ? `${next.suggestion.setting}${next.suggestionUm ? ` · ≈ ${Math.round(next.suggestionUm)} µm` : ''}`
     : null
+  const targetText = next?.suggestion && next.target ? `${formatNumber(next.target.target, 1)}%` : null
+  const targetSuffix = targetText ? (
+    <span className="dashboard-forecast-target" data-testid="next-shot-target"> · target {targetText}</span>
+  ) : null
 
   const forecastCard = !latest ? null : phone ? (
     <button type="button" className="dashboard-forecast-compact" onClick={planNext} data-testid="next-shot-forecast" aria-label="Next-shot forecast. Open Forecast">
@@ -492,7 +499,7 @@ export default function DashboardApp() {
           <p className="big">{formatNumber(fc.extraction, 1)}<small>%</small></p>
           <div className="side">
             <div>{rangeText ? <>Likely <strong>{rangeText}</strong></> : 'Range after 13 shots'}</div>
-            {suggestionText && <div>Suggested grind <strong>{suggestionText}</strong></div>}
+            {suggestionText && <div>Suggested grind <strong>{suggestionText}</strong>{targetSuffix}</div>}
           </div>
         </div>
       ) : <p className="reason">{reason}</p>}
@@ -508,7 +515,7 @@ export default function DashboardApp() {
             {rangeText ? <>Likely range <strong>{rangeText}</strong></> : 'Likely range appears once 13 shots are logged'}
             {fc.coffeeShots ? ` · based on ${fc.coffeeShots} shot${fc.coffeeShots === 1 ? '' : 's'} of this coffee` : ''}
           </p>
-          {suggestionText && <p className="range">Suggested grind <strong>{suggestionText}</strong></p>}
+          {suggestionText && <p className="range">Suggested grind <strong>{suggestionText}</strong>{targetSuffix}</p>}
         </>
       ) : <p className="reason">{reason}</p>}
       <button type="button" className="dashboard-forecast-cta" onClick={planNext}>Plan next shot</button>

@@ -70,12 +70,20 @@ test.describe('analyzer against the old backend', () => {
     await expect(img.first()).toHaveAttribute('alt', 'Size distribution')
   })
 
-  test('save run twice and compare shows the comparison PNG', async ({ page }) => {
+  test('save two runs and compare shows the comparison PNG', async ({ page }) => {
     const errors = trackErrors(page)
     const api = await analyzeWithStub(page)
     const save = page.getByRole('button', { name: /save run/i })
     await save.click()
     await expect(page.getByText(/saved/i).first()).toBeVisible()
+    await expect(save).toBeDisabled() // the same analysis can't be saved twice
+    // erase one particle: different removed clusters, so a second run
+    await page.keyboard.press('4')
+    await clickImage(page, GRID.xs[2], GRID.ys[1])
+    const erase = page.waitForResponse((r) => r.url().includes('/erase'))
+    await page.keyboard.press('Enter')
+    expect((await erase).status()).toBe(200)
+    await expect(save).toBeEnabled()
     await save.click()
     const compare = page.waitForResponse((r) => r.url().includes('/histogram/compare'))
     await page.getByRole('button', { name: 'Compare runs' }).click()

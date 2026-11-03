@@ -660,6 +660,7 @@ function compute(shots, calibration) {
     ratingPrior: ratingPriorOf(rows),
     _rows: rows,
     _btRows: btRows,
+    _predictor: predictor,
     _calibration: calibration,
   }
 }
@@ -834,6 +835,163 @@ export function suggestGrind(model, planned, target = LIMITS.TARGET) {
     }
   }
   return best ? { setting: indexToSetting(best.index), index: best.index, extraction: best.extraction } : null
+}
+
+// ---- grind target -----------------------------------------------------------
+
+export const GREAT_MIN_SHOTS = 3
+
+// One shot filter for both targetFor and the replay: a shot counts only if it would become a
+// model row (a date and a numeric extraction), so the live target and the replayed target agree.
+const isGreatItem = (x) => (
+  x.rated !== false
+  && Boolean(x.date)
+  && isNum(x.extraction)
+  && Math.max(0, Math.min(2, Math.round(Number(x.rating) || 0))) === 2
+)
+
+/** Target from shot-like items ({ coffee: key, extraction, rating, rated }); shared by targetFor and the replay. */
+function targetFromItems(items, coffee, mode) {
+  if (mode !== 'best') return { target: LIMITS.TARGET, source: 'fixed', n: 0 }
+  const great = items.filter(isGreatItem)
+  const mine = hasCoffee(coffee) ? great.filter((x) => x.coffee === coffee) : []
+  if (mine.length >= GREAT_MIN_SHOTS) {
+    return { target: meanOf(mine.map((x) => x.extraction)), source: 'coffee', n: mine.length }
+  }
+  if (great.length >= GREAT_MIN_SHOTS) {
+    return { target: meanOf(great.map((x) => x.extraction)), source: 'all', n: great.length }
+  }
+  return { target: LIMITS.TARGET, source: 'fallback', n: great.length }
+}
+
+/**
+ * The extraction a grind suggestion aims for. mode 'fixed' (default) is 20%. mode 'best'
+ * is the mean extraction of this coffee's Great shots (needs 3), else of all Great shots
+ * (needs 3), else 20%. `coffee` is a coffee key (see coffeeKey). `source` says which was used.
+ */
+export function targetFor(shots, coffee, mode = 'fixed') {
+  if (mode !== 'best') return { target: LIMITS.TARGET, source: 'fixed', n: 0 }
+  const items = (shots || []).filter(Boolean).map((s) => ({
+    coffee: coffeeKey(s), date: s.date, extraction: numOrNull(s.extraction), rating: s.rating, rated: s.rated,
+  }))
+  const out = targetFromItems(items, coffee, mode)
+  if (out.source === 'coffee') {
+    const first = (shots || []).find((s) => s && coffeeKey(s) === coffee)
+    out.coffeeLabel = first ? coffeeLabel(first) : undefined
+  }
+  return out
+}
+
+/**
+ * What Forecast and the Shots card both do: choose the target for the planned coffee, then the
+ * grind closest to it. Returns { suggestion, target } (suggestion is null without a grind effect).
+ */
+export function suggestWithTarget(model, shots, planned, mode = 'fixed') {
+  const target = targetFor(shots, planned?.coffee, mode)
+  return { suggestion: suggestGrind(model, planned, target.target), target }
+}
+
+// ---- suggestion replay ------------------------------------------------------
+
+const REPLAY_SPAN = 27
+const FOLLOW_STEPS = 1
+const DIRECTION_STEPS = 2
+
+function median(values) {
+  if (!values.length) return null
+  const s = [...values].sort((a, b) => a - b)
+  return quantile(s, 0.5)
+}
+
+function replaySummary(rows) {
+  const n = rows.length
+  if (!n) return { n: 0, medianAbsFromTarget: null, withinPct: null }
+  const miss = rows.map((r) => Math.abs(r.extraction - r.target))
+  return {
+    n,
+    medianAbsFromTarget: median(miss),
+    withinPct: (miss.filter((m) => m <= LIMITS.WITHIN).length / n) * 100,
+  }
+}
+
+/**
+ * Replays every past shot: what would the grind suggestion have been using only the shots
+ * before it? Everything about shot i is decided from shots 0..i-1: the ridge fit, the
+ * inputs (chosen per prefix by the same forward selection the nested backtest uses, so a
+ * later shot can never change an earlier suggestion) and the target. `features`, when
+ * given, replaces the per-prefix selection with a fixed input set. A shot "followed" the
+ * suggestion when its setting was within one step of it.
+ */
+export function replaySuggestions(shots, { calibration = null, mode = 'fixed', features = null } = {}) {
+  const empty = {
+    followed: replaySummary([]),
+    notFollowed: replaySummary([]),
+    direction: { agree: 0, total: 0 },
+    evaluated: 0,
+    enough: false,
+    rows: [],
+  }
+  const model = buildForecastModel(shots, { calibration })
+  if (!model.available) return empty
+  const rows = model._btRows
+  const predictor = model._predictor
+  const out = []
+  for (let i = LIMITS.BACKTEST_MIN_TRAIN; i < rows.length; i += 1) {
+    const row = rows[i]
+    if (row.grindIndex === null) continue
+    const train = rows.slice(0, i)
+    const mid = Math.round(row.grindIndex)
+    const chosen = features ? featureKey(features) : predictor.select(i).selected
+    if (!chosen.includes('grind')) continue
+    const { fit } = predictor.entry(chosen, i)
+    if (!fit.used.includes('grind')) continue
+    const tgt = targetFromItems(train, row.coffee, mode)
+    let best = null
+    for (let index = Math.max(0, mid - REPLAY_SPAN); index <= Math.min(MAX_INDEX, mid + REPLAY_SPAN); index += 1) {
+      const pred = predictFit(fit, { ...row, grind: index, grindIndex: index })
+      const dist = Math.abs(pred - tgt.target)
+      if (best === null || dist < best.dist - 1e-12
+        || (Math.abs(dist - best.dist) <= 1e-12 && Math.abs(index - mid) < Math.abs(best.index - mid))) {
+        best = { dist, index, pred }
+      }
+    }
+    if (!best) continue
+    const step = row.grindIndex - best.index
+    out.push({
+      id: row.id,
+      order: row.order,
+      extraction: row.extraction,
+      target: tgt.target,
+      targetSource: tgt.source,
+      actualIndex: row.grindIndex,
+      suggestedIndex: best.index,
+      suggestedExtraction: best.pred,
+      followed: Math.abs(step) <= FOLLOW_STEPS,
+      // Positive when the shot was ground finer than suggested.
+      stepsFiner: -step,
+    })
+  }
+  const followed = out.filter((r) => r.followed)
+  const notFollowed = out.filter((r) => !r.followed)
+  const moved = out.filter((r) => Math.abs(r.stepsFiner) >= DIRECTION_STEPS)
+  // Finer grinding should raise extraction, coarser should lower it, against what the
+  // prefix model expected at the suggested setting.
+  const agreeing = (r) => (r.stepsFiner > 0 ? r.extraction > r.suggestedExtraction : r.extraction < r.suggestedExtraction)
+  const finer = moved.filter((r) => r.stepsFiner > 0)
+  const coarser = moved.filter((r) => r.stepsFiner < 0)
+  return {
+    followed: replaySummary(followed),
+    notFollowed: replaySummary(notFollowed),
+    direction: {
+      agree: moved.filter(agreeing).length,
+      total: moved.length,
+      finer: { agree: finer.filter(agreeing).length, total: finer.length },
+      coarser: { agree: coarser.filter(agreeing).length, total: coarser.length },
+    },
+    evaluated: out.length,
+    enough: followed.length >= 5,
+    rows: out,
+  }
 }
 
 export function dataCoverage(shots, { calibration = null } = {}) {

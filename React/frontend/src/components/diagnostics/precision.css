@@ -1,0 +1,64 @@
+/* Measurement precision card (Diagnostics). Tokens and base classes come from pages/pages.css. */
+
+.el-prec { display: flex; flex-direction: column; gap: 14px; min-width: 0; color: var(--el-text); }
+.el-prec.el-card { padding: 24px; }
+.el-prec h2 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
+.el-prec p { margin: 0; }
+.el-prec .muted { color: var(--el-text-2); }
+.el-prec-lead { font-size: 14px; margin-top: -10px; }
+.el-prec.is-phone .el-prec-lead { margin-top: 0; font-size: 15px; }
+.el-prec-empty { font-size: 15px; color: var(--el-text-2); }
+
+.el-prec-panel { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.el-prec-panel.el-card { padding: 16px 18px; gap: 12px; }
+
+.el-prec-stats { display: flex; flex-wrap: wrap; gap: 12px; }
+.el-prec-stat { flex: 1 1 80px; min-width: 0; }
+.el-prec-stat-label { font-size: 12px; }
+.el-prec-stat-value { margin-top: 2px; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.el-prec-foot { margin-top: -2px; font-size: 12px; }
+
+.el-prec-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.el-prec-sub { font-size: 12px; margin-bottom: 4px; }
+
+.el-prec-strip { display: flex; flex-direction: column; gap: 4px; }
+.el-prec-strip-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; align-items: center; }
+.el-prec-strip-label { font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.el-prec-strip-label strong { font-weight: 600; }
+.el-prec-track { position: relative; height: 26px; }
+.el-prec-track i { position: absolute; display: block; }
+.el-prec-band { top: 3px; bottom: 3px; border-radius: 4px; background: var(--el-photo); opacity: 0.14; }
+.el-prec-mid { left: 50%; top: 0; bottom: 0; width: 1px; background: var(--el-separator); }
+.el-prec-axis { left: 0; right: 0; top: 50%; height: 1px; background: var(--el-surface-2); }
+.el-prec-dot {
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: var(--el-photo);
+  border: 1.5px solid var(--el-surface);
+}
+.el-prec-scale { font-size: 12px; color: var(--el-text-2); }
+.el-prec-scale > div { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+
+.el-prec-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.el-prec-check { display: flex; align-items: center; gap: 10px; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--el-hairline); min-height: 48px; }
+.el-prec-check:first-child { border-top: 0; }
+.el-prec-check-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-variant-numeric: tabular-nums; }
+.el-prec-check-top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 4px; font-size: 14px; }
+.el-prec-check-top .el-badge { margin-left: 6px; }
+.el-prec-check-sub { font-size: 12px; }
+.el-prec-check .el-pill-btn { flex: none; min-height: 32px; padding: 0 14px; border: 0; border-radius: var(--el-r-pill); background: var(--el-fill); color: var(--el-text); font-size: 13px; font-weight: 600; cursor: pointer; }
+.el-prec-check .el-pill-btn:hover:not(:disabled) { background: var(--el-separator); }
+.el-prec-check.is-excluded { color: var(--el-text-2); }
+.el-prec-check.is-excluded .el-prec-check-top strong { font-weight: 500; text-decoration: line-through; }
+
+.el-callout.is-info { background: #EEF5FC; color: #0B3D73; }
+.el-prec-note { margin-top: 0; font-size: 13px; }
+
+@media (max-width: 640px) {
+  .el-prec-check .el-pill-btn { min-height: 44px; }
+  .el-prec-strip-row { grid-template-columns: 76px minmax(0, 1fr); }
+  .el-prec-note { font-size: 14px; }
+}

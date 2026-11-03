@@ -31,6 +31,14 @@ test.describe('analyzer workflow', () => {
     const save = page.getByRole('button', { name: /save run/i })
     await save.click()
     await expect(page.getByText(/saved/i).first()).toBeVisible()
+    await expect(save).toBeDisabled() // the same analysis can't be saved twice
+    // erase one more particle: a different analysis, so a second run
+    await page.evaluate(() => window.scrollTo(0, 0)) // saving scrolled the photo out of view
+    await clickImage(page, GRID.xs[3], GRID.ys[1])
+    const from2 = await engineLogLength(page)
+    await page.keyboard.press('Enter')
+    await waitForEngineOp(page, 'erase', from2)
+    await expect(save).toBeEnabled()
     await save.click()
     await page.getByRole('button', { name: /compare/i }).first().click()
     await expect(page.locator('.compare-summary')).toBeVisible({ timeout: 30_000 })

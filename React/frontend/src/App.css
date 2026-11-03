@@ -1095,6 +1095,9 @@ button.link:hover:not(:disabled),
 }
 
 .dashboard-forecast-card .kicker { font-size: 13px; font-weight: 600; color: #A1A1A6; }
+/* "· target 20.6%" after the suggested grind: the card's own secondary grey (6.9:1 on #1D1D1F; --el-text-2 would be only 3.3:1 here) */
+.dashboard-forecast-card .dashboard-forecast-target,
+.dashboard-forecast-compact .dashboard-forecast-target { font-size: 12px; font-weight: 400; color: #A1A1A6; white-space: nowrap; }
 .dashboard-forecast-card .for { font-size: 15px; color: #D2D2D7; }
 .dashboard-forecast-card .big { font-size: 52px; font-weight: 600; line-height: 1; letter-spacing: -0.035em; font-variant-numeric: tabular-nums; }
 .dashboard-forecast-card .big small { font-size: 26px; color: #A1A1A6; font-weight: 600; }
