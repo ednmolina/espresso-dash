@@ -6,6 +6,9 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const PYTHON = process.env.PYTHON || 'python3'
 const BACKEND_PORT = Number(process.env.E2E_BACKEND_PORT || 8000)
 const VITE_PORT = Number(process.env.E2E_VITE_PORT || 5173)
+// The analyzer runs on-device by default, so only the Vite server is needed. E2E_CLOUD=1 also starts the
+// FastAPI backend and enables cloud.spec.js (the workflow through ?engine=cloud).
+const CLOUD = process.env.E2E_CLOUD === '1'
 
 export default defineConfig({
   testDir: here,
@@ -26,15 +29,17 @@ export default defineConfig({
   },
   projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
   webServer: [
-    {
-      // FastAPI backend in local-dev mode (no Firebase token check, local result storage)
-      command: `${PYTHON} -m uvicorn main:app --port ${BACKEND_PORT}`,
-      cwd: path.resolve(here, '../../../cloudrun'),
-      env: { LOCAL_DEV: 'true', PYTHONUNBUFFERED: '1' },
-      url: `http://localhost:${BACKEND_PORT}/health`,
-      reuseExistingServer: !process.env.CI,
-      timeout: 120_000,
-    },
+    ...(CLOUD
+      ? [{
+          // FastAPI backend in local-dev mode (no Firebase token check, local result storage)
+          command: `${PYTHON} -m uvicorn main:app --port ${BACKEND_PORT}`,
+          cwd: path.resolve(here, '../../../cloudrun'),
+          env: { LOCAL_DEV: 'true', PYTHONUNBUFFERED: '1' },
+          url: `http://localhost:${BACKEND_PORT}/health`,
+          reuseExistingServer: !process.env.CI,
+          timeout: 120_000,
+        }]
+      : []),
     {
       command: `npx vite --port ${VITE_PORT} --strictPort`,
       cwd: path.resolve(here, '..'),

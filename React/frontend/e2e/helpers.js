@@ -102,13 +102,54 @@ export async function setScale(page) {
   await clickImage(page, 300, 40)
 }
 
+/** True when the page was opened with ?engine=cloud (requests go to the Python backend). */
+export function isCloud(page) {
+  return /[?&]engine=cloud\b/.test(page.url())
+}
+
+/** Number of entries in the dev-only `window.__grindEngineLog` (see analyzerClient.js). */
+export function engineLogLength(page) {
+  return page.evaluate(() => (window.__grindEngineLog || []).length)
+}
+
+/**
+ * Waits for an entry for `op` ('upload' | 'analyze' | 'erase' | ...) at index >= fromIndex in the engine log
+ * and returns it ({op, ok, ms, nclusters?, summary?, error?}). Entries with ok = false only match with
+ * `{ ok: false }`; `{ ok: null }` matches either.
+ */
+export async function waitForEngineOp(page, op, fromIndex = 0, { ok = true, timeout = 60_000 } = {}) {
+  const handle = await page.waitForFunction(
+    ({ op, fromIndex, ok }) => {
+      const log = window.__grindEngineLog || []
+      for (let i = fromIndex; i < log.length; i++) {
+        if (log[i].op === op && (ok === null || !!log[i].ok === ok)) return log[i]
+      }
+      return null
+    },
+    { op, fromIndex, ok },
+    { timeout },
+  )
+  return handle.jsonValue()
+}
+
+/**
+ * Presses Enter to detect and waits for the results. Local engine: resolves with the engine log entry
+ * ({nclusters, summary, ms}); cloud engine (?engine=cloud): with the /analyze response body.
+ */
 export async function detect(page) {
-  const analyze = page.waitForResponse((r) => r.url().includes('/analyze') && r.request().method() === 'POST')
+  if (isCloud(page)) {
+    const analyze = page.waitForResponse((r) => r.url().includes('/analyze') && r.request().method() === 'POST')
+    await page.keyboard.press('Enter')
+    const res = await analyze
+    expect(res.status()).toBe(200)
+    await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 60_000 })
+    return res.json()
+  }
+  const from = await engineLogLength(page)
   await page.keyboard.press('Enter')
-  const res = await analyze
-  expect(res.status()).toBe(200)
+  const entry = await waitForEngineOp(page, 'analyze', from)
   await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 60_000 })
-  return res.json()
+  return entry
 }
 
 /** Parse the "N particles" count out of the results heading. */
