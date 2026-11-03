@@ -10,6 +10,7 @@ export default function SegmentedControl({
   value,
   onChange,
   ariaLabel,
+  ariaLabelledBy,
   itemClassName = '',
   testIdPrefix = '',
   role = 'tablist',
@@ -35,7 +36,7 @@ export default function SegmentedControl({
 
   return (
     <div className={`el-seg ${className}`.trim()} data-testid={testId}>
-      <div className="el-seg-items" role={role} aria-label={ariaLabel}>
+      <div className="el-seg-items" role={role} aria-label={ariaLabelledBy ? undefined : ariaLabel} aria-labelledby={ariaLabelledBy}>
         {options.map((option, index) => {
           const active = option.id === value
           const ariaState = itemRole === 'radio' ? { 'aria-checked': active } : { 'aria-selected': active }

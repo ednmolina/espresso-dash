@@ -80,6 +80,22 @@ for (const size of SIZES) {
         .toContainText(/Not enough Great shots of this coffee — using all your Great shots \(\d+\)/)
     })
 
+    test('the fixed target reads as in the mockups; the Aim-for group is named', async ({ page }) => {
+      await openHarness(page, '?calib=1', '#/forecast')
+      await expect(page.locator('[data-testid=forecast-page]')).toBeVisible()
+      await expect(page.locator('[data-testid=forecast-target-line]')).toHaveText(
+        size.phone ? 'Target 20% · middle of the usual 18–22%' : 'Target 20%: the middle of the usual 18–22% range',
+      )
+      const group = page.getByRole('radiogroup', { name: 'Aim for' })
+      await expect(group).toBeVisible()
+      await expect(group.getByRole('radio')).toHaveCount(2)
+      if (size.phone) {
+        for (const id of ['fixed', 'best']) {
+          expect((await page.locator(`[data-testid=forecast-target-${id}]`).boundingBox()).height).toBeGreaterThanOrEqual(44)
+        }
+      }
+    })
+
     test('without a learned grind effect the suggest button falls back to the closest shot to the target', async ({ page }) => {
       await openHarness(page, '?calib=1', '#/forecast')
       await expect(page.locator('[data-testid=forecast-page]')).toBeVisible()
@@ -127,7 +143,7 @@ for (const size of SIZES) {
     })
 
     test('Diagnostics fills the Grind suggestions card once the forecast learns grind', async ({ page }) => {
-      await openHarness(page, '?calib=1&learn=1', '#/diagnostics')
+      await openHarness(page, '?calib=1&learn=1&follow=1', '#/diagnostics')
       await expect(page.locator('[data-testid=diagnostics-page]')).toBeVisible()
       if (size.phone) {
         const row = page.locator('[data-testid=diag-open-grind-suggestions]')
@@ -145,3 +161,23 @@ for (const size of SIZES) {
     })
   })
 }
+
+test.describe('grind target @ narrow phone 320px', () => {
+  test.use({ viewport: { width: 320, height: 640 }, hasTouch: true })
+
+  test('the Aim-for row wraps instead of overflowing, and every control stays reachable', async ({ page }) => {
+    await openHarness(page, '?calib=1&great=1', '#/forecast')
+    await expect(page.locator('[data-testid=forecast-page]')).toBeVisible()
+    expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0)
+    const vw = 320
+    for (const sel of ['forecast-target-fixed', 'forecast-target-best', 'forecast-suggest']) {
+      const box = await page.locator(`[data-testid=${sel}]`).boundingBox()
+      expect(box.x, sel).toBeGreaterThanOrEqual(0)
+      expect(box.x + box.width, sel).toBeLessThanOrEqual(vw)
+      expect(box.height, sel).toBeGreaterThanOrEqual(44)
+    }
+    await page.locator('[data-testid=forecast-target-best]').click()
+    await expect(page.locator('[data-testid=forecast-target-best]')).toHaveAttribute('aria-checked', 'true')
+    expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0)
+  })
+})

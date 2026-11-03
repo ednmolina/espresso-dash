@@ -1,7 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-// Validated (dataviz validator) against the analyzer's dark surface.
-export const SERIES_COLORS = ['#c87533', '#3f87d4', '#5f9e52']
+// Validated (dataviz validator): every pair is at least 15 dE apart for normal vision and each colour has
+// >= 3:1 contrast on the light and the dark surface. Five overlaid lines cannot be told apart by hue alone
+// for everyone (colour-blind viewers), so each run also has its own dash pattern, drawn in the chart, the
+// legend and the saved-runs table. There are at most 5 runs (the Analyzer caps Save run at 5): colours and
+// dashes are never reused. Run 1 is the filled bars, so its line style is "solid".
+export const SERIES_COLORS = ['#c87533', '#3f87d4', '#5f9e52', '#c84b94', '#8a42c5']
+export const SERIES_DASHES = [null, '8 4', '3 3', '10 3 2 3', '0.1 5']
+const SERIES_FALLBACK = '#8e8e93'
+
+export const seriesColor = (i) => SERIES_COLORS[i] ?? SERIES_FALLBACK
+export const seriesDash = (i) => (i < SERIES_DASHES.length ? SERIES_DASHES[i] : '1 2') ?? undefined
+
+/** A short line sample in a run's colour and dash pattern (legend, tooltip, saved-runs table). */
+export function RunSwatch({ index }) {
+  const dash = seriesDash(index)
+  return (
+    <svg className="run-swatch" width="24" height="8" viewBox="0 0 24 8" aria-hidden="true" focusable="false">
+      <line
+        x1="2" x2="22" y1="4" y2="4"
+        stroke={seriesColor(index)}
+        strokeWidth="2.5"
+        strokeDasharray={dash}
+        strokeLinecap={index === 4 ? 'round' : 'butt'}
+      />
+    </svg>
+  )
+}
 
 const MARGIN = { top: 14, right: 16, bottom: 44, left: 48 }
 // compact: no y axis, no axis titles, three x ticks (used in the results card)
@@ -107,7 +132,7 @@ export default function HistogramChart({
         <div className="histogram-legend">
           {series.map((s, i) => (
             <span key={s.label} className="histogram-legend-item">
-              <span className={`histogram-legend-swatch ${i === 0 ? '' : 'line'}`} style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }} />
+              <RunSwatch index={i} />
               {s.label}
             </span>
           ))}
@@ -143,7 +168,7 @@ export default function HistogramChart({
         )}
 
         {series.map((s, si) => {
-          const color = SERIES_COLORS[si % SERIES_COLORS.length]
+          const color = seriesColor(si)
           if (si === 0) {
             return s.fractions.map((f, bi) => {
               if (!f) return null
@@ -164,12 +189,23 @@ export default function HistogramChart({
           let d = `M${x(edges[0])},${baseY}`
           s.fractions.forEach((f, bi) => { d += ` V${y(f ?? 0)} H${x(edges[bi + 1])}` })
           d += ` V${baseY}`
-          return <path key={`s${si}`} d={d} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" />
+          return (
+            <path
+              key={`s${si}`}
+              d={d}
+              fill="none"
+              stroke={color}
+              strokeWidth="2"
+              strokeLinejoin="round"
+              strokeLinecap={si === 4 ? 'round' : 'butt'}
+              strokeDasharray={seriesDash(si)}
+            />
+          )
         })}
 
         {stats.map((st, si) => (
           <g key={`m${si}`}>
-            {Number.isFinite(st.mean) && <line className="hc-mean" x1={x(st.mean)} x2={x(st.mean)} y1={MARGINS.top} y2={baseY} stroke={multi ? SERIES_COLORS[si] : undefined} />}
+            {Number.isFinite(st.mean) && <line className="hc-mean" x1={x(st.mean)} x2={x(st.mean)} y1={MARGINS.top} y2={baseY} stroke={multi ? seriesColor(si) : undefined} />}
             {!multi && Number.isFinite(st.median) && <line className="hc-median" x1={x(st.median)} x2={x(st.median)} y1={MARGINS.top} y2={baseY} />}
           </g>
         ))}
@@ -216,7 +252,7 @@ export default function HistogramChart({
           <strong>{fmt(edges[hover.bin] * scale)}–{fmt(edges[hover.bin + 1] * scale)} {unit}</strong>
           {series.map((s, si) => (
             <span key={s.label}>
-              {multi && <i style={{ background: SERIES_COLORS[si] }} />}
+              {multi && <RunSwatch index={si} />}
               {multi ? `${s.label}: ` : ''}{((s.fractions[hover.bin] ?? 0) * 100).toFixed(1)}%
             </span>
           ))}

@@ -9,6 +9,9 @@
 //   ?great=1    rates the latest shot's coffee Great 3 times (so "Best for this coffee" has its own average)
 //   ?learn=1    gives every shot an extraction that falls with the grind index (20% at index 90, -0.1 pt per
 //               step), so the forecast learns a grind effect and can suggest a setting
+//   ?follow=1   (with learn=1) moves every other shot after the 13th onto 10I/11A/11B, the settings the learned
+//               model suggests (20% at 11A), so enough shots "followed" the replayed suggestion for the
+//               Diagnostics Grind suggestions card to fill in; the replay picks its inputs from earlier shots only
 //   ?nocalib=1  clears the calibration runs and excluded-shot keys
 // Seeded shots: 16 have an Avg Grind (every 3rd, on the curve 300*exp(0.012*index) um) and 12 have a pH
 // (every 4th; the first two are exactly 5.2, the old default; the rest 5.3-5.6).
@@ -71,6 +74,11 @@ const withLearnedGrind = (list) => list.map((s) => ({
   extraction: Math.round((20 - 0.1 * (indexOfSetting(s.grindSetting) - 90)) * 100) / 100,
 }))
 
+// Photo averages (avgGrind) of the moved shots would no longer match their setting, so they are dropped.
+const withFollowed = (list) => list.map((s, i) => (
+  i >= 13 && i % 2 === 1 ? { ...s, grindSetting: ['10I', '11A', '11B'][(i >> 1) % 3], avgGrind: undefined } : s
+))
+
 const CALIB_KEY = 'espressoLab.calibrationRuns.v1'
 const EXCLUDED_KEY = 'espressoLab.calibrationExcludedShots.v1'
 const calibRuns = [[9, 0, false], [10, 4, false], [11, 2, true], [12, 0, false]].map(([macro, microIdx, excluded], n) => {
@@ -99,6 +107,7 @@ try {
     localStorage.removeItem('espresso_dash_cached_shots_v1')
   } else {
     let seeded = params.has('great') ? withGreats() : shots
+    if (params.has('follow')) seeded = withFollowed(seeded)
     if (params.has('learn')) seeded = withLearnedGrind(seeded)
     localStorage.setItem(
       'espresso_dash_cached_shots_v1',

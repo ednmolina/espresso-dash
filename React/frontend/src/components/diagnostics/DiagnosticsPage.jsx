@@ -14,7 +14,7 @@ import {
 } from '../pages/pageCharts'
 import { InsetGroup, ListRow, PageHeader, PagedRow, Sheet, useBreakpoint } from '../shell'
 import GrindSuggestionsCard, { grindSuggestionsSubtitle } from './GrindSuggestionsCard'
-import PrecisionCard, { precisionSubtitle } from './PrecisionCard'
+import PrecisionCard, { precisionSubtitle, useAllChecks } from './PrecisionCard'
 import '../pages/pages.css'
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
@@ -176,6 +176,7 @@ export default function DiagnosticsPage() {
   const model = useForecastModel(shots, cal.mean)
   const coverage = useMemo(() => dataCoverage(shots || [], { calibration: { mean: cal.mean } }), [shots, cal.mean])
   const [grindTargetMode] = useGrindTargetMode()
+  const repeatChecks = useAllChecks() // subscribes, so the phone row's subtitle follows saves and exclusions
   const replay = useMemo(
     () => replaySuggestions(shots || [], { calibration: cal.mean ? { mean: cal.mean } : null, mode: grindTargetMode }),
     [shots, cal.mean, grindTargetMode],
@@ -421,7 +422,7 @@ export default function DiagnosticsPage() {
       { id: 'coverage', title: 'Data coverage', sub: coverage.ph52.count ? `${coverage.ph52.count} shots may have a default pH` : `pH on ${coverage.ph.count} of ${total} shots`, body: coverageBody, testId: 'diag-coverage' },
       { id: 'fit', title: 'Grinder calibration fit', sub: `${fitModel?.n ?? 0} points · ${fitScatter} scatter`, body: fitBody, testId: 'diag-grinder-fit' },
       { id: 'checks', title: 'Photo analysis checks', sub: checksSubtitle(checks), body: null, testId: 'diag-photo-checks', plain: true },
-      { id: 'precision', title: 'Measurement precision', sub: precisionSubtitle(), body: <PrecisionCard phone />, bare: true },
+      { id: 'precision', title: 'Measurement precision', sub: precisionSubtitle(repeatChecks), body: <PrecisionCard phone />, bare: true },
       { id: 'grind-suggestions', title: 'Grind suggestions', sub: grindSuggestionsSubtitle(replay), body: <GrindSuggestionsCard result={replay} mode={grindTargetMode} phone />, bare: true },
     ]
     const open = rows.find((r) => r.id === sheet)

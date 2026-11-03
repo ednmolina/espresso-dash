@@ -1,6 +1,6 @@
 import { useMemo, useSyncExternalStore } from 'react'
-import { listChecks, subscribe } from '../../repeatStore'
-import { checkFromRuns, pooledPrecision } from '../../precision'
+import { listChecks, setExcluded, subscribe } from '../../repeatStore'
+import { checkFromRuns, formatPct, pooledPrecision } from '../../precision'
 import { useLatestAnalysis } from '../../analysisSession'
 import { normalizeSummary } from '../../analyzerCompat'
 import { formatShortDate } from '../dashboard/chartUtils'
@@ -18,11 +18,12 @@ const EMPTY_TEXT = 'Save a repeat check in the Analyzer (2+ photos of the same s
 const NOT_ENOUGH_TEXT = 'Not enough yet: a first estimate needs 3 or more photos across your repeat checks. Save another in the Analyzer.'
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
-const pctText = (p) => `±${Math.round(p.onePhotoPct)}%`
+const ALL_EXCLUDED_TEXT = 'Every repeat check is excluded. Include one below to see the precision again.'
+const pctText = (p) => `±${formatPct(p.onePhotoPct)}%`
 
-function useChecks() {
-  const all = useSyncExternalStore(subscribe, listChecks, listChecks)
-  return useMemo(() => all.filter((c) => !c.excluded), [all])
+/** All saved repeat checks (excluded ones included), re-rendering when any is added, changed or excluded. */
+export function useAllChecks() {
+  return useSyncExternalStore(subscribe, listChecks, listChecks)
 }
 
 /** Local calendar date of an ISO timestamp, as "Nov 2". */
@@ -49,13 +50,65 @@ function precisionModel(checks) {
   return { pooled, any, ref, rows }
 }
 
-/** One-line summary for the phone list row, e.g. "Dv50 ±7% · 4 checks". */
-export function precisionSubtitle() {
-  const checks = listChecks().filter((c) => !c.excluded)
-  if (checks.length === 0) return 'No repeat checks yet'
+/** One-line summary for the phone list row, e.g. "Dv50 ±7% per photo · 4 checks". `all` is the saved checks (useAllChecks). */
+export function precisionSubtitle(all = listChecks()) {
+  if (all.length === 0) return 'No repeat checks yet'
+  const checks = all.filter((c) => !c.excluded)
+  if (checks.length === 0) return 'All checks excluded'
   const { pooled } = precisionModel(checks)
   if (!pooled.dv50) return `${checks.length} ${checks.length === 1 ? 'check' : 'checks'} · not enough yet`
-  return `Dv50 ${pctText(pooled.dv50)} · ${pooled.dv50.checks} ${pooled.dv50.checks === 1 ? 'check' : 'checks'}`
+  return `Dv50 ${pctText(pooled.dv50)} per photo · ${pooled.dv50.checks} ${pooled.dv50.checks === 1 ? 'check' : 'checks'}`
+}
+
+/** Every saved check, newest first, for the include/exclude list. */
+function listRows(all) {
+  return [...all]
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
+    .map((c) => ({
+      id: c.id,
+      grind: c.grindSetting,
+      date: dateLabel(c.createdAt),
+      photos: c.runs.length,
+      cv: checkFromRuns(c.runs).dv50?.cv ?? null,
+      excluded: c.excluded,
+    }))
+}
+
+function ChecksList({ rows }) {
+  return (
+    <ul className="el-prec-list" data-testid="diag-precision-list">
+      {rows.map((r) => {
+        const name = `${r.grind || 'No setting'}${r.date ? `, ${r.date}` : ''}`
+        return (
+          <li
+            key={r.id}
+            className={`el-prec-check${r.excluded ? ' is-excluded' : ''}`}
+            data-testid="diag-precision-check"
+            data-excluded={r.excluded ? 'true' : 'false'}
+          >
+            <div className="el-prec-check-main">
+              <span className="el-prec-check-top">
+                <strong>{r.grind || 'No setting'}</strong>{r.date ? <span className="muted"> · {r.date}</span> : null}
+                {r.excluded ? <span className="el-badge" data-testid="diag-precision-excluded">Excluded</span> : null}
+              </span>
+              <span className="el-prec-check-sub muted">
+                {r.photos} photos{r.cv !== null ? ` · Dv50 CV ${(r.cv * 100).toFixed(1)}%` : ''}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="el-pill-btn"
+              data-testid="diag-precision-exclude"
+              aria-label={`${r.excluded ? 'Include' : 'Exclude'} the ${name} check`}
+              onClick={() => setExcluded(r.id, !r.excluded)}
+            >
+              {r.excluded ? 'Include' : 'Exclude'}
+            </button>
+          </li>
+        )
+      })}
+    </ul>
+  )
 }
 
 const leftPct = (rel) => `${50 + (Math.max(-AXIS, Math.min(AXIS, rel)) / AXIS) * 50}%`
@@ -66,10 +119,10 @@ function DotStrip({ rows, bandPct }) {
   const all = shown.flatMap((r) => r.dots)
   const lo = all.length ? Math.min(...all) : 0
   const hi = all.length ? Math.max(...all) : 0
-  const signed = (v) => `${v < 0 ? 'minus' : 'plus'} ${Math.abs(Math.round(v * 100))}`
+  const signed = (v) => `${v < 0 ? 'minus' : 'plus'} ${formatPct(Math.abs(v * 100))}`
   const label = `Dv50 of each photo compared with the average of its repeat check, for ${shown.length} ${shown.length === 1 ? 'check' : 'checks'}`
     + ` at ${shown.map((r) => r.grind || 'no setting').join(', ')}.`
-    + ` Photos fall between ${signed(lo)} and ${signed(hi)} percent; the shaded band is plus or minus ${Math.round(bandPct)} percent`
+    + ` Photos fall between ${signed(lo)} and ${signed(hi)} percent; the shaded band is plus or minus ${formatPct(bandPct)} percent`
   return (
     <div className="el-prec-strip" role="img" aria-label={label} data-testid="diag-precision-strip">
       {shown.map((r) => (
@@ -106,7 +159,9 @@ function inPhotoNote(latest, dv50) {
 }
 
 export default function PrecisionCard({ phone = false }) {
-  const checks = useChecks()
+  const all = useAllChecks()
+  const checks = useMemo(() => all.filter((c) => !c.excluded), [all])
+  const listed = useMemo(() => listRows(all), [all])
   const latest = useLatestAnalysis()
   const model = useMemo(() => precisionModel(checks), [checks])
   const { pooled, any, ref, rows } = model
@@ -120,16 +175,24 @@ export default function PrecisionCard({ phone = false }) {
     </>
   )
 
+  const Panel = phone ? 'div' : 'section'
   if (!any) {
     return (
       <section className={rootClass} data-testid="diag-precision" aria-label="Measurement precision">
         {head}
-        <p className="el-prec-empty" data-testid="diag-precision-empty">{checks.length === 0 ? EMPTY_TEXT : NOT_ENOUGH_TEXT}</p>
+        <p className="el-prec-empty" data-testid="diag-precision-empty">
+          {all.length === 0 ? EMPTY_TEXT : checks.length === 0 ? ALL_EXCLUDED_TEXT : NOT_ENOUGH_TEXT}
+        </p>
+        {listed.length > 0 ? (
+          <Panel className={phone ? 'el-card el-prec-panel' : 'el-prec-panel'}>
+            <h3 className="el-prec-title">Repeat checks</h3>
+            <ChecksList rows={listed} />
+          </Panel>
+        ) : null}
       </section>
     )
   }
 
-  const Panel = phone ? 'div' : 'section'
   return (
     <section className={rootClass} data-testid="diag-precision" aria-label="Measurement precision">
       {head}
@@ -156,6 +219,12 @@ export default function PrecisionCard({ phone = false }) {
           <DotStrip rows={rows} bandPct={pooled.dv50.onePhotoPct} />
         </Panel>
       ) : null}
+
+      <Panel className={phone ? 'el-card el-prec-panel' : 'el-prec-panel'}>
+        <h3 className="el-prec-title">Repeat checks</h3>
+        <p className="el-prec-sub muted">Exclude a check to leave it out of the numbers above. Nothing is deleted.</p>
+        <ChecksList rows={listed} />
+      </Panel>
 
       {note ? (
         <div className="el-callout is-info el-prec-note" data-testid="diag-precision-note">

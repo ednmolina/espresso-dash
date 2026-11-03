@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { buildCalibration, indexToSetting } from '../grindCalibration'
 import {
-  LIMITS, buildForecastModel, coffeeKey, suggestGrind, targetFor,
+  LIMITS, buildForecastModel, coffeeKey, suggestGrind, suggestWithTarget, targetFor,
 } from '../forecastModel'
 import {
   GRIND_TARGET_KEY, getGrindTargetMode, resetGrindTargetModeCache, setGrindTargetMode, targetLine,
@@ -71,6 +71,12 @@ describe('targetFor', () => {
     expect(u.target).toBeCloseTo((20 + 20.1 + 22) / 3, 10)
   })
 
+  it('counts the same shots as the model rows (and so the replay): a shot without a date is not counted', () => {
+    const shots = [...many(2, A, 20, 2), shot(A, 22, 2, { date: '' }), shot(A, 22, 2, { date: undefined })]
+    expect(targetFor(shots, keyA, 'best')).toMatchObject({ source: 'fallback', n: 2 })
+    expect(targetFor([...shots, shot(A, 22, 2)], keyA, 'best')).toMatchObject({ source: 'coffee', n: 3 })
+  })
+
   it('matches the coffee by key, not by label text', () => {
     const shots = [...many(3, { ...A, roaster: ' ONYX ' }, 21, 2), ...many(3, B, 19, 2)]
     expect(targetFor(shots, keyA, 'best')).toMatchObject({ source: 'coffee', n: 3 })
@@ -79,7 +85,8 @@ describe('targetFor', () => {
 
 describe('targetLine', () => {
   it('words each source', () => {
-    expect(targetLine(targetFor([], keyA, 'fixed'))).toBe('Aiming for 20%.')
+    expect(targetLine(targetFor([], keyA, 'fixed'))).toBe('Target 20%: the middle of the usual 18–22% range')
+    expect(targetLine(targetFor([], keyA, 'fixed'), { phone: true })).toBe('Target 20% · middle of the usual 18–22%')
     expect(targetLine({ target: 20.64, source: 'coffee', n: 5, coffeeLabel: 'Ethiopia Guji' }))
       .toBe('Target 20.6% · average of your 5 Great shots of Ethiopia Guji')
     expect(targetLine({ target: 20.4, source: 'all', n: 12 }))
@@ -113,32 +120,60 @@ describe('suggestGrind in fixed mode', () => {
     })
   }
 
-  it('is byte-identical to the previous behaviour (target 20)', () => {
-    for (const [n, seed, noise] of [[30, 1, 0.3], [60, 2, 1], [120, 3, 0.1]]) {
-      const shots = fixture(n, seed, noise)
-      const model = buildForecastModel(shots)
-      for (const coffee of [keyA, coffeeKey(B)]) {
-        for (const grindSetting of ['8A', '10E', '14H']) {
-          const planned = { coffee, grindSetting, dose: 18, yieldGrams: 40 }
-          const target = targetFor(shots, coffee, 'fixed')
-          expect(target.target).toBe(LIMITS.TARGET)
-          const old = suggestGrind(model, planned, 20)
-          expect(JSON.stringify(suggestGrind(model, planned, target.target))).toBe(JSON.stringify(old))
-          expect(JSON.stringify(suggestGrind(model, planned))).toBe(JSON.stringify(old))
-        }
-      }
+  // Pinned from the code on origin/main (before targets existed): suggestGrind(model, planned) with
+  // no target argument, for each fixture below. [fixture, coffee, planned setting, setting, index, extraction]
+  const PINNED = [
+  ['30/1/0.3', 'A', '8A', '11A', 90, 20.40094439796204],
+  ['30/1/0.3', 'A', '10E', '11I', 98, 20.01134985545544],
+  ['30/1/0.3', 'A', '14H', '11I', 98, 20.01134985545544],
+  ['30/1/0.3', 'B', '8A', '11A', 90, 20.430049618287946],
+  ['30/1/0.3', 'B', '10E', '12A', 99, 20.002560475523076],
+  ['30/1/0.3', 'B', '14H', '12A', 99, 20.002560475523076],
+  ['60/2/1', 'A', '8A', '11A', 90, 20.51513331660676],
+  ['60/2/1', 'A', '10E', '12B', 100, 19.99697419206958],
+  ['60/2/1', 'A', '14H', '12B', 100, 19.99697419206958],
+  ['60/2/1', 'B', '8A', '11A', 90, 20.497427198533206],
+  ['60/2/1', 'B', '10E', '12B', 100, 19.99184540560809],
+  ['60/2/1', 'B', '14H', '12B', 100, 19.99184540560809],
+  ['120/3/0.1', 'A', '8A', '11A', 90, 20.479548049240442],
+  ['120/3/0.1', 'A', '10E', '12B', 100, 19.981885903513007],
+  ['120/3/0.1', 'A', '14H', '12B', 100, 19.981885903513007],
+  ['120/3/0.1', 'B', '8A', '11A', 90, 20.48151397056716],
+  ['120/3/0.1', 'B', '10E', '12B', 100, 19.981806368929732],
+  ['120/3/0.1', 'B', '14H', '12B', 100, 19.981806368929732],
+  ['cal', 'A', '10E', '12B', 100, 19.991748020981422],
+  ['cal', 'A', '6B', '9B', 73, 21.32048805936286],
+  ['cal', 'A', '14H', '12B', 100, 19.991748020981422],
+  ]
+  const PLAN = { A: keyA, B: coffeeKey(B) }
+  const CAL_RUNS = [40, 80, 120].map((x, i) => ({ id: `r${i}`, grindSetting: indexToSetting(x), mean_um: 300 * Math.exp(0.01 * x) }))
+  const modelFor = (name) => {
+    if (name === 'cal') {
+      const shots = fixture(40, 5, 0.4)
+      return { shots, model: buildForecastModel(shots, { calibration: { mean: buildCalibration(shots, CAL_RUNS, []).mean } }) }
     }
-  })
+    const [n, seed, noise] = name.split('/').map(Number)
+    const shots = fixture(n, seed, noise)
+    return { shots, model: buildForecastModel(shots) }
+  }
 
-  it('with a calibration curve too', () => {
-    const shots = fixture(40, 5, 0.4)
-    const runs = [40, 80, 120].map((x, i) => ({ id: `r${i}`, grindSetting: indexToSetting(x), mean_um: 300 * Math.exp(0.01 * x) }))
-    const cal = buildCalibration(shots, runs, [])
-    const model = buildForecastModel(shots, { calibration: { mean: cal.mean } })
-    const planned = { coffee: keyA, grindSetting: '10E', dose: 18, yieldGrams: 40 }
-    const old = suggestGrind(model, planned, 20)
-    expect(old).not.toBeNull()
-    expect(JSON.stringify(suggestGrind(model, planned, targetFor(shots, keyA, 'fixed').target))).toBe(JSON.stringify(old))
+  it('fixed mode gives exactly the old results (pinned literals), by every call path', () => {
+    expect(PINNED.length).toBeGreaterThan(20)
+    for (const [name, who, grindSetting, setting, index, extraction] of PINNED) {
+      const { shots, model } = modelFor(name)
+      const planned = { coffee: PLAN[who], grindSetting, dose: 18, yieldGrams: 40 }
+      const expected = { setting, index, extraction }
+      const label = `${name} ${who} ${grindSetting}`
+      // what Forecast and the Shots card call
+      const viaPages = suggestWithTarget(model, shots, planned, 'fixed')
+      expect(viaPages.target).toEqual({ target: LIMITS.TARGET, source: 'fixed', n: 0 })
+      expect(viaPages.suggestion, label).toEqual(expected)
+      // and the model function itself, with and without the explicit 20
+      expect(suggestGrind(model, planned), label).toEqual(expected)
+      expect(suggestGrind(model, planned, targetFor(shots, planned.coffee, 'fixed').target), label).toEqual(expected)
+      // the default mode is fixed
+      expect(suggestWithTarget(model, shots, planned).suggestion, label).toEqual(expected)
+    }
   })
 
   it('a different target moves the suggestion', () => {

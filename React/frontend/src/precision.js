@@ -10,6 +10,8 @@
 export const METRICS = ['dv10', 'dv50', 'dv90']
 export const MIN_RUNS_PER_CHECK = 2
 export const MIN_POOLED_PHOTOS = 3
+// Dv50 spread above this (15%) between "repeat" photos means they are most likely not the same grind.
+export const DIFFERENT_SAMPLE_CV = 0.15
 
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 
@@ -65,4 +67,33 @@ export function pooledPrecision(checks) {
     out[m] = { cv, onePhotoPct: 2 * cv * 100, checks: used.length, photos }
   })
   return out
+}
+
+/**
+ * The "±X" number for a percentage: whole numbers from 1% up, one decimal below that so a tight
+ * result never reads "±0%" (0.04 -> "0.1" at the smallest, exactly 0 -> "0").
+ */
+export function formatPct(pct) {
+  if (!finite(pct) || pct <= 0) return '0'
+  if (pct < 1) return Math.max(0.1, Math.round(pct * 10) / 10).toFixed(1)
+  return String(Math.round(pct))
+}
+
+/** Identity of an Analyzer saved run: the frozen analysis plus the clusters removed from it. */
+export function savedRunKey(run) {
+  const ids = Array.isArray(run?.removedIds) ? [...run.removedIds].map(String).sort() : []
+  const sm = run?.summary ?? {}
+  // Older servers give no analysis_id, so one image id covers every detection: add the numbers too.
+  return `${run?.imageId ?? ''}|${ids.join(',')}|${sm.cluster_count ?? ''}|${sm.dv50_mm ?? ''}`
+}
+
+/** The saved runs with repeats of the same analysis dropped (first one wins). */
+export function uniqueSavedRuns(runs) {
+  const seen = new Set()
+  return (Array.isArray(runs) ? runs : []).filter((r) => {
+    const key = savedRunKey(r)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }

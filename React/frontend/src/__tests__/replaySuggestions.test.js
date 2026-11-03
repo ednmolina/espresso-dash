@@ -42,7 +42,8 @@ describe('replaySuggestions', () => {
   it('classifies, summarises and checks direction on a noise-free example', () => {
     const shots = linearShots(60)
     const res = replaySuggestions(shots, { mode: 'fixed' })
-    expect(res.evaluated).toBe(60 - LIMITS.BACKTEST_MIN_TRAIN)
+    // inputs are chosen per prefix, which needs BACKTEST_MIN_TRAIN + MIN_EVAL earlier shots
+    expect(res.evaluated).toBe(60 - LIMITS.BACKTEST_MIN_TRAIN - LIMITS.MIN_EVAL)
     expect(res.rows).toHaveLength(res.evaluated)
     expect(res.followed.n + res.notFollowed.n).toBe(res.evaluated)
 
@@ -91,6 +92,34 @@ describe('replaySuggestions', () => {
     expect(after.rows.filter((r) => r.order > K)).not.toEqual(pristine.rows.filter((r) => r.order > K))
   })
 
+  it('never uses later shots to choose the inputs either (no features override)', () => {
+    const r = rng(3)
+    // Early shots: grind matters weakly. Later shots: ratio and pH dominate, so the full-history
+    // selection differs from what any early prefix could have picked.
+    const shots = Array.from({ length: 60 }, (_, i) => {
+      const idx = 80 + Math.floor(r() * 41)
+      const ratio = 1.8 + r() * 0.8
+      const ph = 5 + r()
+      return {
+        id: `s${i}`, date: day(i), createdAt: `${day(i)}T08:00:00Z`, roaster: 'A',
+        grindSetting: indexToSetting(idx), dose: 18, yieldGrams: 18 * ratio, ph,
+        extraction: 20 - 0.1 * (idx - 100) + 0.6 * r(), rating: 1,
+      }
+    })
+    const K = 30
+    const r2 = rng(9)
+    const mutated = shots.map((s, i) => (i <= K ? s : {
+      ...s, extraction: 20 + 4 * (s.yieldGrams / 18 - 2.2) + 3 * (s.ph - 5.5) + 0.2 * r2(),
+    }))
+    // the change really does alter which inputs the full-history model picks
+    expect(buildForecastModel(mutated).selected).not.toEqual(buildForecastModel(shots).selected)
+    const before = replaySuggestions(shots)
+    const after = replaySuggestions(mutated)
+    const upTo = (res) => res.rows.filter((x) => x.order <= K)
+    expect(upTo(before).length).toBeGreaterThan(5)
+    expect(upTo(after)).toEqual(upTo(before))
+  })
+
   it('best mode targets the average of earlier Great shots only', () => {
     const shots = linearShots(40, 5, () => ({}))
     const res = replaySuggestions(shots, { mode: 'best' })
@@ -129,7 +158,7 @@ describe('replaySuggestions', () => {
   })
 
   it('reports "enough" once 5 shots followed the suggestion', () => {
-    const res = replaySuggestions(linearShots(80, 11))
+    const res = replaySuggestions(linearShots(100, 11))
     expect(res.followed.n).toBeGreaterThanOrEqual(5)
     expect(res.enough).toBe(true)
   })

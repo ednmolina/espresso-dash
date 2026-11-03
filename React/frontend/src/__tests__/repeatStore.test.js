@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  STORAGE_KEY, _resetForTests, addCheck, exportJson, importJson, listChecks, setExcluded, subscribe,
+  STORAGE_KEY, _resetForTests, addCheck, exportJson, importJson, listChecks, setExcluded, subscribe, updateCheck, saveCheck,
 } from '../repeatStore'
 
 function memoryStorage({ throwOnSet = false, throwOnGet = false } = {}) {
@@ -31,6 +31,64 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
   _resetForTests()
+})
+
+describe('updateCheck', () => {
+  it('replaces the photos of the same check: id, date and excluded flag stay', () => {
+    const first = addCheck(partial()).check
+    setExcluded(first.id, true)
+    const seen = vi.fn()
+    subscribe(seen)
+    const res = updateCheck(first.id, { grindSetting: '12A', runs: [photo(450), photo(470), photo(485), photo(460)] })
+    expect(res).toMatchObject({ ok: true, persisted: true })
+    expect(res.check).toMatchObject({ id: first.id, createdAt: first.createdAt, excluded: true, grindSetting: '12A' })
+    expect(res.check.runs).toHaveLength(4)
+    expect(listChecks()).toHaveLength(1)
+    expect(seen).toHaveBeenCalledTimes(1)
+    _resetForTests() // a fresh page load
+    expect(listChecks()).toEqual([res.check])
+  })
+
+  it('keeps the old setting when none is given, and rejects bad input without changing anything', () => {
+    const first = addCheck(partial()).check
+    expect(updateCheck(first.id, { runs: [photo(500), photo(510)] }).check.grindSetting).toBe('10E')
+    const before = listChecks()
+    expect(updateCheck(first.id, { runs: [photo(500)] })).toMatchObject({ ok: false })
+    expect(updateCheck(first.id, {})).toMatchObject({ ok: false })
+    expect(updateCheck('nope', { runs: [photo(1), photo(2)] })).toMatchObject({ ok: false, notFound: true })
+    expect(listChecks()).toBe(before)
+  })
+})
+
+describe('saveCheck (adding photos after a save)', () => {
+  it('first save adds; saving again with the id updates the same check instead of overlapping it', () => {
+    const a = saveCheck(null, partial())
+    expect(a).toMatchObject({ ok: true, updated: false })
+    const b = saveCheck(a.check.id, partial({ runs: [photo(450), photo(470), photo(485), photo(460)] }))
+    expect(b).toMatchObject({ ok: true, updated: true })
+    expect(b.check.id).toBe(a.check.id)
+    expect(listChecks()).toHaveLength(1)
+    expect(listChecks()[0].runs).toHaveLength(4)
+    const c = saveCheck(a.check.id, partial({ runs: [photo(450), photo(470), photo(485), photo(460), photo(455)] }))
+    expect(c.check.id).toBe(a.check.id)
+    expect(listChecks()).toHaveLength(1)
+  })
+
+  it('adds a new check when the old one has been removed from storage', () => {
+    const a = saveCheck(null, partial())
+    _resetForTests()
+    storage.data.clear()
+    const b = saveCheck(a.check.id, partial())
+    expect(b).toMatchObject({ ok: true, updated: false })
+    expect(b.check.id).not.toBe(a.check.id)
+    expect(listChecks()).toHaveLength(1)
+  })
+
+  it('does not add a second check when the update itself is invalid', () => {
+    const a = saveCheck(null, partial())
+    expect(saveCheck(a.check.id, { runs: [photo(1)] })).toMatchObject({ ok: false, updated: false })
+    expect(listChecks()).toHaveLength(1)
+  })
 })
 
 describe('repeatStore', () => {

@@ -660,6 +660,7 @@ function compute(shots, calibration) {
     ratingPrior: ratingPriorOf(rows),
     _rows: rows,
     _btRows: btRows,
+    _predictor: predictor,
     _calibration: calibration,
   }
 }
@@ -840,8 +841,11 @@ export function suggestGrind(model, planned, target = LIMITS.TARGET) {
 
 export const GREAT_MIN_SHOTS = 3
 
+// One shot filter for both targetFor and the replay: a shot counts only if it would become a
+// model row (a date and a numeric extraction), so the live target and the replayed target agree.
 const isGreatItem = (x) => (
   x.rated !== false
+  && Boolean(x.date)
   && isNum(x.extraction)
   && Math.max(0, Math.min(2, Math.round(Number(x.rating) || 0))) === 2
 )
@@ -868,7 +872,7 @@ function targetFromItems(items, coffee, mode) {
 export function targetFor(shots, coffee, mode = 'fixed') {
   if (mode !== 'best') return { target: LIMITS.TARGET, source: 'fixed', n: 0 }
   const items = (shots || []).filter(Boolean).map((s) => ({
-    coffee: coffeeKey(s), extraction: numOrNull(s.extraction), rating: s.rating, rated: s.rated,
+    coffee: coffeeKey(s), date: s.date, extraction: numOrNull(s.extraction), rating: s.rating, rated: s.rated,
   }))
   const out = targetFromItems(items, coffee, mode)
   if (out.source === 'coffee') {
@@ -876,6 +880,15 @@ export function targetFor(shots, coffee, mode = 'fixed') {
     out.coffeeLabel = first ? coffeeLabel(first) : undefined
   }
   return out
+}
+
+/**
+ * What Forecast and the Shots card both do: choose the target for the planned coffee, then the
+ * grind closest to it. Returns { suggestion, target } (suggestion is null without a grind effect).
+ */
+export function suggestWithTarget(model, shots, planned, mode = 'fixed') {
+  const target = targetFor(shots, planned?.coffee, mode)
+  return { suggestion: suggestGrind(model, planned, target.target), target }
 }
 
 // ---- suggestion replay ------------------------------------------------------
@@ -903,8 +916,10 @@ function replaySummary(rows) {
 
 /**
  * Replays every past shot: what would the grind suggestion have been using only the shots
- * before it? The inputs the full model selected stay fixed (`features` overrides them);
- * only the ridge is refitted on each prefix, so this is fast. A shot "followed" the
+ * before it? Everything about shot i is decided from shots 0..i-1: the ridge fit, the
+ * inputs (chosen per prefix by the same forward selection the nested backtest uses, so a
+ * later shot can never change an earlier suggestion) and the target. `features`, when
+ * given, replaces the per-prefix selection with a fixed input set. A shot "followed" the
  * suggestion when its setting was within one step of it.
  */
 export function replaySuggestions(shots, { calibration = null, mode = 'fixed', features = null } = {}) {
@@ -918,18 +933,17 @@ export function replaySuggestions(shots, { calibration = null, mode = 'fixed', f
   }
   const model = buildForecastModel(shots, { calibration })
   if (!model.available) return empty
-  const selected = featureKey(features || model.selected)
-  if (!selected.includes('grind')) return empty
   const rows = model._btRows
+  const predictor = model._predictor
   const out = []
   for (let i = LIMITS.BACKTEST_MIN_TRAIN; i < rows.length; i += 1) {
     const row = rows[i]
     if (row.grindIndex === null) continue
     const train = rows.slice(0, i)
     const mid = Math.round(row.grindIndex)
-    const { used, rowsOk } = resolveUsed(train, selected, row)
-    if (!used.includes('grind')) continue
-    const fit = fitModel(rowsOk, used, row.coffee)
+    const chosen = features ? featureKey(features) : predictor.select(i).selected
+    if (!chosen.includes('grind')) continue
+    const { fit } = predictor.entry(chosen, i)
     if (!fit.used.includes('grind')) continue
     const tgt = targetFromItems(train, row.coffee, mode)
     let best = null

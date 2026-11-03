@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkFromRuns, dvFromSummary, pooledPrecision, summaryStats } from '../precision'
+import { checkFromRuns, dvFromSummary, formatPct, pooledPrecision, savedRunKey, summaryStats, uniqueSavedRuns } from '../precision'
 
 const runs = (dv50s, extra = {}) => dv50s.map((v) => ({ dv10_um: v / 2, dv50_um: v, dv90_um: v * 2, ...extra }))
 
@@ -94,5 +94,31 @@ describe('pooledPrecision', () => {
     expect(p.dv90.checks).toBe(1)
     expect(p.dv90.photos).toBe(3)
     expect(pooledPrecision(null).dv50).toBeNull()
+  })
+})
+
+describe('formatPct', () => {
+  it('rounds to whole numbers from 1% and shows one decimal below, never "0"', () => {
+    expect(formatPct(7.2)).toBe('7')
+    expect(formatPct(0.96)).toBe('1.0')
+    expect(formatPct(1)).toBe('1')
+    expect(formatPct(0.6)).toBe('0.6')
+    expect(formatPct(0.04)).toBe('0.1')
+    expect(formatPct(0)).toBe('0')
+    expect(formatPct(null)).toBe('0')
+  })
+})
+
+describe('saved run identity', () => {
+  const run = (over = {}) => ({ imageId: 'img.a1', removedIds: [], summary: { cluster_count: 10, dv50_mm: 0.5 }, ...over })
+  it('same analysis and same removed clusters is the same run, in any order', () => {
+    expect(savedRunKey(run({ removedIds: [3, 1] }))).toBe(savedRunKey(run({ removedIds: [1, 3] })))
+    expect(savedRunKey(run())).not.toBe(savedRunKey(run({ imageId: 'img.b2' })))
+    expect(savedRunKey(run())).not.toBe(savedRunKey(run({ removedIds: [1] })))
+  })
+  it('uniqueSavedRuns drops repeats and keeps the first', () => {
+    const a = run(); const b = run({ imageId: 'img.b2' })
+    expect(uniqueSavedRuns([a, b, { ...a }, b])).toEqual([a, b])
+    expect(uniqueSavedRuns(null)).toEqual([])
   })
 })

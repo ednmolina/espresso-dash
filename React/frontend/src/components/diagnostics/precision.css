@@ -42,10 +42,23 @@
 .el-prec-scale { font-size: 12px; color: var(--el-text-2); }
 .el-prec-scale > div { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
 
+.el-prec-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.el-prec-check { display: flex; align-items: center; gap: 10px; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--el-hairline); min-height: 48px; }
+.el-prec-check:first-child { border-top: 0; }
+.el-prec-check-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-variant-numeric: tabular-nums; }
+.el-prec-check-top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 4px; font-size: 14px; }
+.el-prec-check-top .el-badge { margin-left: 6px; }
+.el-prec-check-sub { font-size: 12px; }
+.el-prec-check .el-pill-btn { flex: none; min-height: 32px; padding: 0 14px; border: 0; border-radius: var(--el-r-pill); background: var(--el-fill); color: var(--el-text); font-size: 13px; font-weight: 600; cursor: pointer; }
+.el-prec-check .el-pill-btn:hover:not(:disabled) { background: var(--el-separator); }
+.el-prec-check.is-excluded { color: var(--el-text-2); }
+.el-prec-check.is-excluded .el-prec-check-top strong { font-weight: 500; text-decoration: line-through; }
+
 .el-callout.is-info { background: #EEF5FC; color: #0B3D73; }
 .el-prec-note { margin-top: 0; font-size: 13px; }
 
 @media (max-width: 640px) {
+  .el-prec-check .el-pill-btn { min-height: 44px; }
   .el-prec-strip-row { grid-template-columns: 76px minmax(0, 1fr); }
   .el-prec-note { font-size: 14px; }
 }

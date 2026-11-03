@@ -13,7 +13,7 @@ import {
   parsePhInput,
   updateShotCellInFirestore,
 } from '../../dashboardData'
-import { coffeeKey, coffeeLabel, forecast, suggestGrind, targetFor } from '../../forecastModel'
+import { coffeeKey, coffeeLabel, forecast, suggestWithTarget } from '../../forecastModel'
 import { useGrindTargetMode } from '../../grindTargetPref'
 import { useNav } from '../../navigation'
 import { useShots } from '../../shotsStore'
@@ -258,8 +258,7 @@ export default function DashboardApp() {
       yieldGrams: latest.yieldGrams,
     }
     const result = forecast(model, planned)
-    const target = targetFor(shots ?? [], planned.coffee, grindTargetMode)
-    const suggestion = suggestGrind(model, planned, target.target)
+    const { suggestion, target } = suggestWithTarget(model, shots ?? [], planned, grindTargetMode)
     const size = suggestion ? estimate(suggestion.setting) : null
     return {
       planned,
@@ -486,7 +485,7 @@ export default function DashboardApp() {
     : null
   const targetText = next?.suggestion && next.target ? `${formatNumber(next.target.target, 1)}%` : null
   const targetSuffix = targetText ? (
-    <span className="dashboard-forecast-target" data-testid="next-shot-target" style={{ fontSize: 12, opacity: 0.7 }}> · target {targetText}</span>
+    <span className="dashboard-forecast-target" data-testid="next-shot-target"> · target {targetText}</span>
   ) : null
 
   const forecastCard = !latest ? null : phone ? (

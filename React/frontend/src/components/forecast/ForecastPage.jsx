@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { parsePhInput } from '../../dashboardData'
-import { coffeeKey, forecast, listCoffees, suggestGrind, sweepGrind, targetFor } from '../../forecastModel'
+import { coffeeKey, forecast, listCoffees, suggestWithTarget, sweepGrind, targetFor } from '../../forecastModel'
 import { parseSetting, settingToIndex } from '../../grindCalibration'
 import { targetLine, useGrindTargetMode } from '../../grindTargetPref'
 import { useNav } from '../../navigation'
@@ -136,11 +136,11 @@ export default function ForecastPage() {
   const coffeeLabelText = coffeeEntry?.label ?? 'No coffee yet'
 
   const target = useMemo(() => targetFor(shots || [], coffee, targetMode), [shots, coffee, targetMode])
-  const targetText = targetLine(target)
+  const targetText = targetLine(target, { phone })
   const onTargetMode = (mode) => { setTargetMode(mode); setNote('') }
 
   const onSuggest = () => {
-    const s = suggestGrind(model, planned, target.target)
+    const { suggestion: s } = suggestWithTarget(model, shots || [], planned, targetMode)
     if (s && s.setting) {
       setGrind(s.setting)
       const um = cal.estimate(s.setting)?.um
@@ -225,6 +225,7 @@ export default function ForecastPage() {
       value={targetMode}
       onChange={onTargetMode}
       ariaLabel="Aim for"
+      ariaLabelledBy={phone ? undefined : 'forecast-aim-label'}
       role="radiogroup"
       className="el-target-seg"
       testIdPrefix="forecast-target-"
@@ -265,9 +266,6 @@ export default function ForecastPage() {
             <span className="muted" data-testid="forecast-grind-um">{grindEst ? `≈ ${Math.round(grindEst.um)} µm (est.)` : 'no µm estimate yet'}</span>
           </div>
           <GrindSettingPicker value={grind} onChange={setGrindManual} layout="stepper" size="lg" label="Grind setting" testId="forecast-grind" />
-          <div className="el-grind-foot">
-            <span className="muted">Finer ← → Coarser</span>
-          </div>
           <div className="el-target-row">
             {targetControl}
             <button type="button" className="el-btn-tinted is-small" data-testid="forecast-suggest" onClick={onSuggest} disabled={!available}>

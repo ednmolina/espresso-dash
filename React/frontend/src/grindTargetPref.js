@@ -49,9 +49,14 @@ export function resetGrindTargetModeCache() { current = null }
 
 const pct1 = (v) => `${(Math.round(v * 10) / 10).toFixed(1)}%`
 
-/** One line saying what the suggestion aims for and why. `t` is the result of targetFor. */
-export function targetLine(t) {
-  if (!t || t.source === 'fixed') return 'Aiming for 20%.'
+/**
+ * One line saying what the suggestion aims for and why. `t` is the result of targetFor.
+ * The fixed wording follows the mockups: a colon on tablet/desktop, a middle dot on the phone.
+ */
+export function targetLine(t, { phone = false } = {}) {
+  if (!t || t.source === 'fixed') {
+    return phone ? 'Target 20% · middle of the usual 18–22%' : 'Target 20%: the middle of the usual 18–22% range'
+  }
   if (t.source === 'coffee') {
     return `Target ${pct1(t.target)} · average of your ${t.n} Great shots of ${t.coffeeLabel || 'this coffee'}`
   }

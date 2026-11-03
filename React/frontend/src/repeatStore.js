@@ -162,6 +162,44 @@ export function addCheck(partial) {
   return { ok: true, check, persisted }
 }
 
+/**
+ * Replace the photos (and setting) of an existing check, keeping its id, date and excluded flag. Used when
+ * more photos of the same sample are added after a check was already saved. Unknown id: { ok: false, notFound: true }.
+ */
+export function updateCheck(id, partial) {
+  ensureLoaded()
+  const index = checks.findIndex((c) => c.id === id)
+  if (index < 0) return { ok: false, notFound: true, check: null, persisted: false, error: 'That repeat check is no longer saved.' }
+  const prev = checks[index]
+  const check = sanitizeCheck({
+    ...prev,
+    ...(partial && 'grindSetting' in partial ? { grindSetting: partial.grindSetting } : {}),
+    runs: partial?.runs,
+    id: prev.id,
+    createdAt: prev.createdAt,
+    excluded: prev.excluded,
+  })
+  if (!check) {
+    return { ok: false, check: null, persisted: false, error: 'A repeat check needs 2 or more photos with a particle size.' }
+  }
+  checks = checks.map((c, i) => (i === index ? check : c))
+  const persisted = writeJson(STORAGE_KEY, checks)
+  notify()
+  return { ok: true, check, persisted }
+}
+
+/**
+ * Save the photos of one sample: updates check `existingId` in place when it is still stored (more
+ * photos were added since it was saved), otherwise adds a new check. `updated` says which happened.
+ */
+export function saveCheck(existingId, partial) {
+  if (existingId) {
+    const res = updateCheck(existingId, partial)
+    if (res.ok || !res.notFound) return { ...res, updated: res.ok }
+  }
+  return { ...addCheck(partial), updated: false }
+}
+
 export function setExcluded(id, excluded) {
   ensureLoaded()
   const index = checks.findIndex((c) => c.id === id)
