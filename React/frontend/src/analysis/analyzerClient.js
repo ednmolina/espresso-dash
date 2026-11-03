@@ -107,6 +107,7 @@ export function createAnalyzerClient({ getUser } = {}) {
       cancel() { return false },
       // The Cloud Run API has no live threshold preview.
       thresholdPreview: async () => ({ unsupported: true }),
+      dropPreviewCache: async () => ({ ok: true }),
       onProgress: () => () => {},
       dispose() {},
     }
@@ -185,6 +186,8 @@ export function createAnalyzerClient({ getUser } = {}) {
      * Resolves { stale: true } when nothing matching is cached. Never calls cancel().
      */
     thresholdPreview: (body) => engine.thresholdPreview(body),
+    /** Frees the preview cache (leaving Threshold); previews are stale until the next analyze. */
+    dropPreviewCache: () => engine.dropPreviewCache(),
     onProgress: (cb) => engine.onProgress(cb),
     dispose: disposeLocalEngine,
   }

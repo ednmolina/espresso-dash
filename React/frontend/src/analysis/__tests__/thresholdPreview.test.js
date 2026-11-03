@@ -188,6 +188,22 @@ describe('thresholdPreview', () => {
     expect(res.analysis_id).toBeTruthy()
   })
 
+  it('dropPreviewCache and erase free the cache: previews are stale until the next analyze', () => {
+    const a = analyzed()
+    const ask = (s) => s.engine.thresholdPreview({ image_id: s.id, threshold_percent: 60 })
+    expect(ask(a).stale).toBeUndefined()
+    a.engine.dropPreviewCache()
+    expect(ask(a)).toEqual({ stale: true })
+    a.engine.analyze({ image_id: a.id, ...REF })
+    expect(ask(a).stale).toBeUndefined()
+
+    const e = analyzed()
+    e.engine.erase({ image_id: e.id, erase_points: [[10, 10]], erase_radius_px: 5 })
+    expect(ask(e)).toEqual({ stale: true })
+    e.engine.analyze({ image_id: e.id, ...REF })
+    expect(ask(e).stale).toBeUndefined()
+  })
+
   it('is stale when the polygon, analysis_id, background model, seed or scale differ from the cached analysis', () => {
     const { engine, id, res } = analyzed({ polygon_points: POLY })
     const ask = (extra) => engine.thresholdPreview({ image_id: id, threshold_percent: 60, ...extra })

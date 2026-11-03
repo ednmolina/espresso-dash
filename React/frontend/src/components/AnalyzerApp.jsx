@@ -279,8 +279,10 @@ export default function AnalyzerApp({ user }) {
   // Threshold control: Manual is the engine's 'fixed' mode; Auto shows the percent the engine chose.
   const isManual = settings.threshold_mode === 'fixed'
   const usedPercent = analysisResult?.threshold_percent_used ?? analysisResult?.summary?.threshold_percent_used
-  const autoPercent = Number.isFinite(usedPercent) ? usedPercent : settings.threshold_percent
-  const thresholdShown = isManual ? settings.threshold_percent : autoPercent
+  // Auto shows what the engine chose; until a result from an Auto run exists there is no such value yet
+  // (no result, nothing detected, or Auto was just chosen and its detection has not come back).
+  const autoKnown = !isManual && Number.isFinite(usedPercent) && analysisResult?.summary?.threshold_mode !== 'fixed'
+  const thresholdShown = isManual ? settings.threshold_percent : autoKnown ? usedPercent : settings.threshold_percent
 
   useEffect(() => () => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
@@ -382,6 +384,10 @@ export default function AnalyzerApp({ user }) {
 
   // Cancel terminates the on-device worker, and the analyses stored in it die with it.
   const cancelBusy = () => {
+    // a cancelled detection must not restart: forget queued and debounced re-detections and the preview
+    pendingRunRef.current = null
+    clearTimeout(detectTimer.current)
+    dropPreview()
     const lost = client.cancel()
     if (lost && savedRuns.length > 0) {
       cancelLostRuns.current = true
@@ -657,6 +663,12 @@ export default function AnalyzerApp({ user }) {
     if (!analysisResult || lastRunKey.current !== inputsKey) runAnalysis({ after: 'threshold' })
   })
 
+  // Live previews only serve the Threshold step: once you move on, the engine frees what they need
+  // (they answer stale until the next detection, which is fine: releasing the slider detects anyway).
+  useEffect(() => {
+    if (mode === 'erase' || mode === 'reference') client.dropPreviewCache?.()
+  }, [mode, client])
+
   const goErase = () => {
     if (!analysisResult) return
     setMode('erase')
@@ -720,7 +732,7 @@ export default function AnalyzerApp({ user }) {
       devLog({ op: 'thresholdPreview', ok: false, ms: Math.round(performance.now() - t0), percent, error: err?.message })
     } finally {
       st.inFlight = false
-      if (st.wanted != null && gen === st.gen) st.raf = requestAnimationFrame(() => pumpRef.current?.())
+      if (st.wanted != null) st.raf = requestAnimationFrame(() => pumpRef.current?.())
     }
   }
 
@@ -738,7 +750,7 @@ export default function AnalyzerApp({ user }) {
   const scheduleDetect = (delayMs) => {
     clearTimeout(detectTimer.current)
     const wait = isLocal ? delayMs : Math.max(delayMs, CLOUD_DETECT_DELAY_MS)
-    const fire = () => runAnalysis({ after: 'threshold', quiet: true })
+    const fire = () => runRef.current?.({ after: 'threshold', quiet: true })
     if (wait > 0) detectTimer.current = setTimeout(fire, wait)
     else fire()
   }
@@ -754,7 +766,7 @@ export default function AnalyzerApp({ user }) {
   const handleThresholdChange = (value, kind) => {
     const cur = settingsRef.current
     // only a real change leaves Auto (touching the thumb without moving it does not)
-    if (cur.threshold_mode !== 'fixed' && round1(value) === round1(thresholdShown)) return
+    if (cur.threshold_mode !== 'fixed' && autoKnown && round1(value) === round1(thresholdShown)) return
     if (cur.threshold_mode !== 'fixed' || cur.threshold_percent !== value) {
       updateSettings(cur.threshold_mode === 'fixed'
         ? { ...cur, threshold_percent: value }
@@ -1585,9 +1597,10 @@ export default function AnalyzerApp({ user }) {
                 <ThresholdControl
                   mode={isManual ? 'manual' : 'auto'}
                   value={thresholdShown}
+                  unknown={!isManual && !autoKnown}
                   particles={analysisResult ? analysisResult.nclusters ?? null : null}
                   updating={busy && busyQuiet}
-                  disabled={!canDetect}
+                  disabled={!canDetect || (busy && !busyQuiet)}
                   onChange={handleThresholdChange}
                   onAuto={handleThresholdAuto}
                 />

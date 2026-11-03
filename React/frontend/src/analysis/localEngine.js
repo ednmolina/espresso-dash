@@ -1,6 +1,6 @@
 // Main-thread front for the on-device engine.
 //
-//   createLocalEngine() -> { upload(file, {expect}), analyze, thresholdPreview, erase, histogram, compare, preview,
+//   createLocalEngine() -> { upload(file, {expect}), analyze, thresholdPreview, dropPreviewCache, erase, histogram, compare, preview,
 //                            cancel(), dispose(), onProgress(cb) -> unsubscribe }
 //
 // Where things run:
@@ -336,6 +336,16 @@ export function createLocalEngine({ forceInline = false } = {}) {
     })
   }
 
+  /** Frees the engine's threshold-preview cache; later previews answer {stale: true} until the next analyze. */
+  function dropPreviewCache() {
+    // nothing registered (no worker, or after cancel): nothing to free, and no worker is spawned for it
+    if (registeredId == null) return Promise.resolve({ ok: true })
+    return withWorkerFallback(async () => {
+      if (hasWorker) return call('dropPreviewCache', {})
+      return runInline(async ({ engine }) => { engine.dropPreviewCache(); return { ok: true } })
+    }).catch(() => ({ ok: true }))
+  }
+
   function erase(body) {
     return withWorkerFallback(async () => {
       if (hasWorker) return layersToImages(await call('erase', body), null)
@@ -397,5 +407,5 @@ export function createLocalEngine({ forceInline = false } = {}) {
     return () => listeners.delete(cb)
   }
 
-  return { upload, analyze, thresholdPreview, erase, histogram, compare, preview, cancel, dispose, onProgress }
+  return { upload, analyze, thresholdPreview, dropPreviewCache, erase, histogram, compare, preview, cancel, dispose, onProgress }
 }

@@ -448,8 +448,14 @@ export function createEngine() {
     }
   }
 
+  /** Frees the threshold-preview cache (flattened channel + polygon mask); previews answer stale until the next analyze. */
+  function dropPreviewCache() {
+    previewCache = null
+  }
+
   function erase(body) {
     validateErase(body)
+    dropPreviewCache() // cleaning up no longer needs live previews, so the big arrays can go
     const stored = getResult(body.image_id)
     if (!stored) throw httpError(404, 'No analysis found for this image.')
     if (!stored.has_pixels) throw httpError(404, 'No analysis found for this image.')
@@ -511,5 +517,5 @@ export function createEngine() {
     return compareFromStored(storedList, req)
   }
 
-  return { registerImage, analyze, thresholdPreview, erase, histogram, compare, hasImage, dropImage }
+  return { registerImage, analyze, thresholdPreview, dropPreviewCache, erase, histogram, compare, hasImage, dropImage }
 }

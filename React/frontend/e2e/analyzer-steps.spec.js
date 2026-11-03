@@ -259,6 +259,28 @@ for (const vp of VIEWPORTS) {
       expect(errors).toEqual([])
     })
 
+    test('Cancel stops a detection for good: a queued threshold re-detect does not restart it', async ({ page }) => {
+      await openAnalyzer(page, '?engineDelay=2500')
+      await uploadFixture(page)
+      await setScale(page)
+      await waitForAutoDetect(page)
+      // '+' arms the debounced threshold detection (300 ms); Enter starts a full detection first, so when the
+      // timer fires it finds the engine busy and is queued behind it
+      await page.getByRole('button', { name: 'Raise the threshold' }).click()
+      const from = await engineLogLength(page)
+      await page.locator('canvas').first().focus() // a focused button would take Enter for itself
+      await page.keyboard.press('Enter')
+      await expect(page.getByRole('button', { name: /^cancel$/i })).toBeVisible()
+      await page.waitForTimeout(700) // the timer has fired by now
+      await page.getByRole('button', { name: /^cancel$/i }).click()
+      await expect(page.getByText('Detection cancelled.').first()).toBeVisible()
+      await page.waitForTimeout(1000) // a restarted detection would be busy again by now
+      await expect(page.locator('.canvas-area[aria-busy="true"]')).toHaveCount(0)
+      await page.waitForTimeout(3200) // ...and would have finished by now
+      const ops = await page.evaluate((i) => window.__grindEngineLog.slice(i).filter((e) => e.op === 'analyze').map((e) => e.ok), from)
+      expect(ops).toEqual([false]) // only the cancelled one
+    })
+
     test('Enter detects again and Next still reaches Clean up', async ({ page }) => {
       await openAnalyzer(page)
       await uploadFixture(page)

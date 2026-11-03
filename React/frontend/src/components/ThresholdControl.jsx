@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 
 const MIN = 1
 const MAX = 100
@@ -13,6 +13,7 @@ const clamp = (v) => Math.max(MIN, Math.min(MAX, v))
  *
  * Presentational: the parent owns the settings and the detection.
  *   mode       'auto' | 'manual'  (what the chip says; Auto follows the value the engine chose)
+ *   unknown    Auto has no engine value yet: show an ellipsis instead of the number
  *   value      the percent to show (the engine's value in Auto, the chosen one in Manual)
  *   particles  count from the latest result, or null
  *   updating   a detection is running for the value just chosen
@@ -20,8 +21,11 @@ const clamp = (v) => Math.max(MIN, Math.min(MAX, v))
  *              lifted: detect now) or 'step' (keyboard, -/+: apply, then detect after a short pause)
  *   onAuto     back to the automatic threshold
  */
-export default function ThresholdControl({ mode, value, particles, updating = false, disabled = false, onChange, onAuto }) {
+export default function ThresholdControl({ mode, value, unknown = false, particles, updating = false, disabled = false, onChange, onAuto }) {
   const dragging = useRef(false)
+  const rangeRef = useRef(null)
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
   const shown = round1(clamp(Number.isFinite(value) ? value : 50))
   const isAuto = mode === 'auto'
 
@@ -37,6 +41,20 @@ export default function ThresholdControl({ mode, value, particles, updating = fa
     dragging.current = false
     onChange(round1(clamp(parseFloat(e.currentTarget.value))), 'release')
   }
+  // The native `change` event ends a drag too (pointerup can be missed, e.g. when the pointer is
+  // captured elsewhere); whichever comes first commits, the other finds the drag already over.
+  useEffect(() => {
+    const el = rangeRef.current
+    if (!el) return undefined
+    const onNativeChange = () => {
+      if (!dragging.current) return
+      dragging.current = false
+      onChangeRef.current(round1(clamp(parseFloat(el.value))), 'release')
+    }
+    el.addEventListener('change', onNativeChange)
+    return () => el.removeEventListener('change', onNativeChange)
+  }, [])
+
   const nudge = (dir) => {
     const v = round1(clamp(shown + dir * NUDGE))
     if (v !== shown) onChange(v, 'step')
@@ -63,7 +81,7 @@ export default function ThresholdControl({ mode, value, particles, updating = fa
       </div>
 
       <div className="thr-value-row">
-        <output className="thr-value" data-testid="threshold-value" aria-live="off">{shown.toFixed(1)}%</output>
+        <output className="thr-value" data-testid="threshold-value" aria-live="off">{unknown ? '…' : `${shown.toFixed(1)}%`}</output>
         <span className={`thr-chip ${isAuto ? 'is-auto' : 'is-manual'}`} data-testid="threshold-chip">{isAuto ? 'Auto' : 'Manual'}</span>
       </div>
 
@@ -71,10 +89,11 @@ export default function ThresholdControl({ mode, value, particles, updating = fa
         <button type="button" className="thr-step" aria-label="Lower the threshold" onClick={() => nudge(-1)} disabled={disabled || shown <= MIN}>−</button>
         <input
           type="range"
+          ref={rangeRef}
           className="thr-range"
           data-testid="threshold-slider"
           aria-label="Threshold percent"
-          aria-valuetext={`${shown.toFixed(1)} percent, ${isAuto ? 'automatic' : 'manual'}`}
+          aria-valuetext={unknown ? 'automatic, not yet measured' : `${shown.toFixed(1)} percent, ${isAuto ? 'automatic' : 'manual'}`}
           min={MIN}
           max={MAX}
           step={STEP}

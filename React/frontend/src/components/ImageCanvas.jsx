@@ -607,6 +607,11 @@ export default function ImageCanvas({
 
   const finishPointer = useCallback((event) => endPointer(event, false), [endPointer])
   const cancelPointer = useCallback((event) => endPointer(event, true), [endPointer])
+  // Capture lost while a pointer is still tracked (it normally follows pointerup, when the pointer is gone
+  // already): the gesture is over without a lift, so it can never place a point.
+  const lostCapture = useCallback((event) => {
+    if (pointersRef.current.has(event.pointerId)) endPointer(event, true)
+  }, [endPointer])
 
   // -------------------------------------------------------------------------
   // Cursor style
@@ -677,6 +682,7 @@ export default function ImageCanvas({
         onPointerLeave={() => { hoverRef.current = null; requestPreviewRedraw() }}
         onPointerUp={finishPointer}
         onPointerCancel={cancelPointer}
+        onLostPointerCapture={lostCapture}
       />
       {brushFlash && mode === 'erase' && <div className="brush-flash" role="status">Brush {eraseRadius} px</div>}
       <div className="canvas-hud hud-zoom" role="group" aria-label="Zoom">

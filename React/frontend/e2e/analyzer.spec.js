@@ -61,31 +61,31 @@ test.describe('analyzer UI acceptance', () => {
     await detect(page)
     // Threshold is a taller card by design (steps, then the control); Clean up keeps the one-row toolbar.
     for (const step of ['3', '4']) {
-    await page.keyboard.press(step)
-    for (const [w, h] of [[1440, 900], [1280, 800], [1024, 768], [390, 844]]) {
-      await page.setViewportSize({ width: w, height: h })
-      await page.waitForTimeout(250)
-      const overflow = await page.evaluate(() => {
-        const bad = []
-        if (document.documentElement.scrollWidth > window.innerWidth) bad.push('document')
-        for (const el of document.querySelectorAll('.results-column *, .toolbar *, .histogram-stat-row')) {
-          if (!(el instanceof SVGElement) && el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflow === 'visible' && el.clientWidth > 0) {
-            bad.push(`${el.tagName}.${String(el.className?.baseVal ?? el.className)}`)
+      await page.keyboard.press(step)
+      for (const [w, h] of [[1440, 900], [1280, 800], [1024, 768], [390, 844]]) {
+        await page.setViewportSize({ width: w, height: h })
+        await page.waitForTimeout(250)
+        const overflow = await page.evaluate(() => {
+          const bad = []
+          if (document.documentElement.scrollWidth > window.innerWidth) bad.push('document')
+          for (const el of document.querySelectorAll('.results-column *, .toolbar *, .histogram-stat-row')) {
+            if (!(el instanceof SVGElement) && el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflow === 'visible' && el.clientWidth > 0) {
+              bad.push(`${el.tagName}.${String(el.className?.baseVal ?? el.className)}`)
+            }
           }
-        }
-        return bad
-      })
-      expect(overflow, `overflow at ${w}px, step ${step}`).toEqual([])
-      if (w >= 1280 && step === '4') {
-        const tb = await page.evaluate(() => {
-          const t = document.querySelector('.toolbar')
-          const tops = [...t.children].map((c) => c.offsetTop)
-          return { h: t.getBoundingClientRect().height, spread: Math.max(...tops) - Math.min(...tops) }
+          return bad
         })
-        expect(tb.h, `toolbar height at ${w}`).toBeLessThanOrEqual(56)
-        expect(tb.spread, `toolbar row spread at ${w}`).toBeLessThanOrEqual(4)
+        expect(overflow, `overflow at ${w}px, step ${step}`).toEqual([])
+        if (w >= 1280 && step === '4') {
+          const tb = await page.evaluate(() => {
+            const t = document.querySelector('.toolbar')
+            const tops = [...t.children].map((c) => c.offsetTop)
+            return { h: t.getBoundingClientRect().height, spread: Math.max(...tops) - Math.min(...tops) }
+          })
+          expect(tb.h, `toolbar height at ${w}`).toBeLessThanOrEqual(56)
+          expect(tb.spread, `toolbar row spread at ${w}`).toBeLessThanOrEqual(4)
+        }
       }
-    }
     }
   })
 
