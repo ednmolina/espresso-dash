@@ -391,6 +391,10 @@ async function clickTwoPoints(page) {
   await clickImage(page, 480, 150)
 }
 
+// On a 320px phone the photo is short and the top is covered by the zoom HUD and (after a result) the
+// overlay buttons, so these taps stay in the clear lower band of the photo.
+const NARROW_AREA = [[150, 220], [480, 220], [480, 380]]
+
 // Five steps still fit a very narrow phone, with no horizontal scroll, in Area and in Threshold.
 for (const width of [390, 320]) {
   test.describe(`stepper fits @ ${width}px`, () => {
@@ -403,7 +407,7 @@ for (const width of [390, 320]) {
         if (phase === 'area') await setScale(page)
         if (phase === 'threshold') {
           const from = await engineLogLength(page)
-          await drawArea(page)
+          await drawArea(page, NARROW_AREA)
           await waitForEngineOp(page, 'analyze', from)
         }
         await page.waitForTimeout(300)
@@ -428,7 +432,7 @@ for (const width of [390, 320]) {
       await useWholePhoto(page)
       await waitForAutoDetect(page)
       await page.keyboard.press('3')
-      await clickImage(page, 150, 150)
+      await clickImage(page, 150, 300)
       await expect(page.getByTestId('stale-tag')).toBeVisible()
       await page.waitForTimeout(300)
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0)
@@ -442,7 +446,7 @@ for (const width of [390, 320]) {
       await openAnalyzer(page, '?engineDelay=4000')
       await uploadFixture(page)
       await setScale(page)
-      await drawArea(page)
+      await drawArea(page, NARROW_AREA)
       await expect(page.locator('.canvas-area[aria-busy="true"]')).toBeVisible()
       await expect(page.locator('.step[data-step=threshold] .spinner')).toBeVisible()
       await page.waitForTimeout(300)

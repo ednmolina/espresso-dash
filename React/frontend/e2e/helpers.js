@@ -94,6 +94,13 @@ export async function imageToPage(page, x, y) {
 
 export async function clickImage(page, x, y) {
   const p = await imageToPage(page, x, y)
+  // page.mouse.click lands on whatever is on top; fail loudly if an overlay (zoom HUD, overlay buttons,
+  // results sheet) covers the photo there, instead of silently losing the tap.
+  const hit = await page.evaluate(([px, py]) => {
+    const el = document.elementFromPoint(px, py)
+    return el && el.tagName === 'CANVAS' ? null : (el ? `${el.tagName}.${el.className}` : 'nothing')
+  }, [p.x, p.y])
+  if (hit) throw new Error(`clickImage(${x}, ${y}) would hit ${hit}, not the photo`)
   await page.mouse.click(p.x, p.y)
 }
 
