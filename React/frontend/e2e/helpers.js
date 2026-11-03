@@ -107,8 +107,18 @@ export async function setScale(page, { preset, mm } = {}) {
   if (preset) await page.locator('[data-testid=scale-preset]').selectOption(preset)
   if (mm != null) await page.locator('[data-testid=scale-mm]').fill(String(mm))
   await clickImage(page, 100, 40)
+  // The second click starts a detection by itself. On the cloud engine, listen for its /analyze response
+  // before clicking, so `detect` can't miss a reply that lands before it starts waiting.
+  if (isCloud(page)) {
+    const pending = page.waitForResponse(isAnalyzeResponse)
+    pending.catch(() => {}) // unused when a test never calls detect(); don't surface the page-close rejection
+    pendingCloudAnalyze.set(page, pending)
+  }
   await clickImage(page, 300, 40)
 }
+
+const pendingCloudAnalyze = new WeakMap()
+const isAnalyzeResponse = (r) => r.url().includes('/analyze') && r.request().method() === 'POST'
 
 /** True when the page was opened with ?engine=cloud (requests go to the Python backend). */
 export function isCloud(page) {
@@ -163,8 +173,14 @@ export async function showResults(page) {
  */
 export async function detect(page) {
   if (isCloud(page)) {
-    const analyze = page.waitForResponse((r) => r.url().includes('/analyze') && r.request().method() === 'POST')
-    await page.keyboard.press('Enter')
+    // Use the response `setScale` is already waiting for (the Threshold step's own detection); otherwise
+    // press Enter to start one.
+    let analyze = pendingCloudAnalyze.get(page)
+    pendingCloudAnalyze.delete(page)
+    if (!analyze) {
+      analyze = page.waitForResponse(isAnalyzeResponse)
+      await page.keyboard.press('Enter')
+    }
     const res = await analyze
     expect(res.status()).toBe(200)
     await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 60_000 })
