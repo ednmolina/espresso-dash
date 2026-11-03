@@ -461,12 +461,14 @@ label.el-btn-tinted:hover { background: var(--el-separator); }
 
 .el-target-seg { align-self: flex-start; }
 .el-target-seg .el-seg-items { width: 100%; }
-.el-target-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.el-target-row { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.el-target-row + .el-hint { margin-top: 2px; line-height: 1.25; }
+.el-grind-card .el-suggest-note { margin-top: 2px; }
 .el-target-row .el-target-seg { flex: 1 1 auto; min-width: 0; }
 .el-target-row .el-seg-items { width: 100%; }
 .el-target-row .el-seg-item { flex: 1 1 0; padding: 0 10px; white-space: nowrap; }
 .el-target-row .el-btn-tinted { flex: none; }
-.el-forecast-inputs .el-target-seg { display: flex; margin-top: 4px; }
+.el-forecast-inputs .el-target-seg { display: flex; align-self: stretch; margin-top: 4px; }
 .el-forecast-inputs .el-target-seg .el-seg-item { flex: 1 1 0; }
 .el-suggest-note { font-size: 14px; font-weight: 500; margin-top: 6px; }
 .el-forecast-inputs .el-suggest-note { margin-top: -6px; }
