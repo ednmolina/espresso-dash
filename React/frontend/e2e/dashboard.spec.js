@@ -205,7 +205,9 @@ test.describe('dashboard shots workflow @ 1440px', () => {
     await page.locator('[data-testid=tab-origins]').click()
     await expect(page.locator('[data-testid=origins-map]')).toBeVisible()
     await expect(page.locator('[data-testid=map-legend]')).toBeVisible()
-    await expect(page.locator('.dashboard-map-marker').first()).toBeVisible()
+    // tile images may be blocked in CI/sandbox, so assert the elements rather than pixels
+    expect(await page.locator('img.dashboard-map-tile').count()).toBeGreaterThan(0)
+    await expect(page.locator('.dashboard-map-marker')).toHaveCount(48)
 
     const rows = page.locator('[data-testid=table-origins-log] tbody tr')
     await expect(rows).toHaveCount(48)

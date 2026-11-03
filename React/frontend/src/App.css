@@ -396,32 +396,6 @@ h1, h2 {
   border-color: transparent;
 }
 
-/* Header goes dark with the analyzer so the chrome doesn't glare. */
-.workspace-analyzer {
-  background: var(--dk-bg);
-}
-
-.workspace-analyzer .workspace-header {
-  background: rgba(18, 14, 11, 0.92);
-  border-bottom-color: var(--dk-border);
-  color: var(--dk-text);
-}
-
-.workspace-analyzer .workspace-switcher { background: var(--dk-surface); }
-.workspace-analyzer .workspace-switch { color: var(--dk-muted); }
-.workspace-analyzer .workspace-switch:hover:not(:disabled) { background: transparent; color: var(--dk-text); }
-
-.workspace-analyzer .workspace-switch[aria-current='page'],
-.workspace-analyzer .workspace-switch[aria-current='page']:hover:not(:disabled) {
-  background: var(--dk-surface-3);
-  color: var(--dk-text);
-  box-shadow: 0 0 0 1px var(--dk-border-strong);
-}
-
-.workspace-analyzer .workspace-user-chip { background: var(--dk-accent); color: var(--dk-bg); }
-.workspace-analyzer .workspace-logout { color: var(--dk-muted); }
-.workspace-analyzer .workspace-logout:hover:not(:disabled) { background: var(--dk-surface-2); color: var(--dk-text); }
-
 .workspace-body {
   flex: 1;
   min-height: 0;
@@ -485,9 +459,6 @@ h1, h2 {
   .app-tabbar-item svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
   .app-tabbar-item[aria-current='page'] { color: var(--el-link); font-weight: 600; }
 
-  .workspace-analyzer .app-tabbar { background: rgba(18, 14, 11, 0.92); border-top-color: var(--dk-border); }
-  .workspace-analyzer .app-tabbar-item { color: var(--dk-muted); }
-  .workspace-analyzer .app-tabbar-item[aria-current='page'] { color: var(--dk-accent); }
 }
 
 @media (prefers-reduced-transparency: reduce) {
