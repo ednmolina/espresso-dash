@@ -208,6 +208,7 @@ export default function AnalyzerApp({ user }) {
   const [calSavedFor, setCalSavedFor] = useState(null)
   const [resultsHidden, setResultsHidden] = useState(readHidden)
   const [sheetDetent, setSheetDetent] = useState('half') // phone: 'half' | 'full' while the results are shown
+  const [sheetOpened, setSheetOpened] = useState(false) // phone: the sheet was opened by hand during Threshold
   const [dragH, setDragH] = useState(null)
   const objectUrlRef = useRef(null)
   const histSeq = useRef(0)
@@ -232,6 +233,7 @@ export default function AnalyzerApp({ user }) {
   const detectTimer = useRef(0)
   const previewRef = useRef({ inFlight: false, wanted: null, raf: 0, gen: 0 })
   const previewImgRef = useRef(null)
+  const pumpRef = useRef(null)
   const [previewLayer, setPreviewLayer] = useState(null)
   const [busyQuiet, setBusyQuiet] = useState(false) // a threshold re-run: no blocking card over the photo
   const [, bump] = useState(0)
@@ -276,9 +278,8 @@ export default function AnalyzerApp({ user }) {
 
   // Threshold control: Manual is the engine's 'fixed' mode; Auto shows the percent the engine chose.
   const isManual = settings.threshold_mode === 'fixed'
-  const autoPercent = Number.isFinite(analysisResult?.threshold_percent_used)
-    ? analysisResult.threshold_percent_used
-    : settings.threshold_percent
+  const usedPercent = analysisResult?.threshold_percent_used ?? analysisResult?.summary?.threshold_percent_used
+  const autoPercent = Number.isFinite(usedPercent) ? usedPercent : settings.threshold_percent
   const thresholdShown = isManual ? settings.threshold_percent : autoPercent
 
   useEffect(() => () => {
@@ -484,7 +485,11 @@ export default function AnalyzerApp({ user }) {
   const handlePointAdded = useCallback((x, y) => {
     if (mode === 'reference') {
       // the second tap completes the scale and moves on to Threshold (see the effect below)
-      if (referencePoints.length === 1) wantDetectRef.current = true
+      if (referencePoints.length === 1 && referencePhysicalMm > 0) {
+        wantDetectRef.current = true
+        setMode('threshold')
+        setOverlayMode('threshold')
+      }
       setReferencePoints((prev) => {
         const next = [...prev, { x, y }]
         return next.length > 2 ? next.slice(-1) : next
@@ -494,7 +499,7 @@ export default function AnalyzerApp({ user }) {
     } else if (mode === 'erase') {
       setErasePoints((prev) => [...prev, { x, y }])
     }
-  }, [mode, referencePoints.length])
+  }, [mode, referencePoints.length, referencePhysicalMm])
 
   // Keep the status line in step with the scale taps.
   useEffect(() => {
@@ -565,17 +570,27 @@ export default function AnalyzerApp({ user }) {
     if (analysisResult?.summary) loadHistogram(removedIds, weight)
   }
 
-  const canDetect = referencePoints.length === 2
+  const canDetect = pixelScale != null
 
-  const runAnalysis = useCallback(async () => {
-    if (!imageId || busy) return
-    if (!canDetect) { say('Set the scale first: click both edges of the coin.', 'error'); return }
-    startBusy(DETECT_LABEL)
+  /**
+   * Detects particles with the current inputs. `after` is where the person lands: 'threshold' (the default)
+   * or 'erase'. `quiet` keeps the photo uncovered (a threshold re-run). A request made while another run
+   * is busy is remembered (only the newest) and runs when that one finishes.
+   */
+  const runAnalysis = useCallback(async (opts = {}) => {
+    const after = opts.after === 'erase' ? 'erase' : 'threshold'
+    const quiet = Boolean(opts.quiet)
+    if (!imageId) return
+    if (!canDetect) { say('Set the scale first: tap both ends of the reference length.', 'error'); return }
+    if (busyRef.current) { pendingRunRef.current = opts; return }
+    startBusy(DETECT_LABEL, { quiet })
     say(DETECT_LABEL)
     const started = performance.now()
 
     // the old Cloud Run server rejects the new options, so they are not sent with ?engine=cloud
-    const { body: settingsBody, stripped } = analysisSettingsPayload(settings, { isLocal })
+    const used = settingsRef.current
+    const { body: settingsBody, stripped } = analysisSettingsPayload(used, { isLocal })
+    const key = JSON.stringify([imageId, referencePoints, referencePhysicalMm, polygonPoints, used])
 
     try {
       const data = await client.request('/analyze', {
@@ -587,29 +602,199 @@ export default function AnalyzerApp({ user }) {
           polygon_points: polygonPoints.map((point) => [point.x, point.y]),
         },
       })
+      lastRunKey.current = key
+      dropPreview()
       setAnalysisResult(data)
       setRemovedIds([])
       setErasePoints([])
       setHistogram(null)
       setHistExpanded(false)
-      setOverlayMode('clusters')
-      setMode('erase')
+      if (after === 'erase') {
+        setOverlayMode('clusters')
+        setMode('erase')
+      } else if (!quiet) {
+        setOverlayMode('threshold')
+        setMode('threshold')
+      }
       setDownloadsOpen(false)
       const secs = ((performance.now() - started) / 1000).toFixed(1)
       setLatestAnalysis({ summary: data.summary ?? null, shape_summary: data.shape_summary ?? null, split_info: data.split_info ?? null })
+      const n = (data.nclusters ?? 0).toLocaleString()
       say(
-        `${(data.nclusters ?? 0).toLocaleString()} particles detected in ${secs}s. Click stray clusters to remove them.`
+        after === 'erase'
+          ? `${n} particles detected in ${secs}s. Click stray clusters to remove them.`
+          : `${n} particles detected in ${secs}s. Adjust the threshold, then continue to Clean up.`
           + (stripped.length ? ` ${stripped.join(' and ')} need on-device analysis, so ${stripped.length === 1 ? 'it was' : 'they were'} skipped.` : ''),
         'success',
       )
       if (data.summary) loadHistogram([], histWeight)
     } catch (err) {
+      dropPreview()
       if (wasCancelled(err)) sayCancelled('Detection cancelled.')
       else say(`Detection failed: ${err.message}. Try lowering Threshold or Analysis resolution.`, 'error')
     } finally {
-      setBusy(false)
+      endBusy()
     }
-  }, [imageId, busy, canDetect, settings, referencePoints, referencePhysicalMm, polygonPoints, client, isLocal, loadHistogram, histWeight])
+  }, [imageId, canDetect, referencePoints, referencePhysicalMm, polygonPoints, client, isLocal, loadHistogram, histWeight])
+  runRef.current = runAnalysis
+
+  // ---- Threshold step ----------------------------------------------------------------------
+
+  /** Moves to Threshold; the effect below detects once the state it depends on has settled. */
+  const goThreshold = () => {
+    setSheetOpened(false)
+    if (!canDetect) { say('Set the scale first: tap both ends of the reference length.', 'error'); return }
+    wantDetectRef.current = true
+    setMode('threshold')
+    setOverlayMode('threshold')
+    bump((n) => n + 1)
+  }
+
+  useEffect(() => {
+    if (!wantDetectRef.current || mode !== 'threshold') return
+    wantDetectRef.current = false
+    if (!canDetect) return
+    if (!analysisResult || lastRunKey.current !== inputsKey) runAnalysis({ after: 'threshold' })
+  })
+
+  const goErase = () => {
+    if (!analysisResult) return
+    setMode('erase')
+    // the cluster overlay is what you click on while cleaning up
+    setOverlayMode((o) => (o === 'threshold' ? 'clusters' : o))
+  }
+
+  // Next: Clean up. A result that no longer matches the inputs (settings changed) is refreshed first.
+  const nextCleanUp = () => {
+    if (!analysisResult || busy) return
+    if (lastRunKey.current !== inputsKey) runAnalysis({ after: 'erase' })
+    else goErase()
+  }
+
+  // Live preview: at most one request in flight, the newest value wins, paced to animation frames.
+  // Replies that arrive after the detection they were for finished (or after a new photo) are dropped.
+  const canPreview = isLocal && typeof client.thresholdPreview === 'function'
+
+  const dropPreview = () => {
+    const st = previewRef.current
+    st.gen += 1
+    st.wanted = null
+    if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0 }
+    showPreview(null, null)
+  }
+
+  const showPreview = (image, percent) => {
+    const old = previewImgRef.current
+    previewImgRef.current = image
+    setPreviewLayer(image ? { image, percent } : null)
+    // closed a moment later so the canvas never draws a closed bitmap
+    if (old && old !== image && isImageLayer(old)) setTimeout(() => { try { old.close() } catch { /* already closed */ } }, 300)
+  }
+
+  const pumpPreview = async () => {
+    const st = previewRef.current
+    st.raf = 0
+    if (st.inFlight || st.wanted == null || !imageId) return
+    const percent = st.wanted
+    st.wanted = null
+    st.inFlight = true
+    const gen = st.gen
+    const t0 = performance.now()
+    try {
+      const res = await client.thresholdPreview({
+        image_id: imageId,
+        threshold_percent: percent,
+        max_pixels: isPhone ? PREVIEW_MAX_PIXELS_PHONE : PREVIEW_MAX_PIXELS,
+        // a result that no longer matches (new run, edited area) answers { stale: true }
+        analysis_id: analysisResult?.analysis_id,
+        polygon_points: polygonPoints.map((point) => [point.x, point.y]),
+      })
+      const image = res?.threshold_layer ?? null
+      devLog({ op: 'thresholdPreview', ok: true, ms: Math.round(performance.now() - t0), percent, stale: Boolean(res?.stale || res?.unsupported) })
+      if (gen !== st.gen || res?.stale || res?.unsupported || !image || typeof image === 'string') {
+        if (isImageLayer(image)) { try { image.close() } catch { /* already closed */ } }
+      } else {
+        showPreview(image, percent)
+      }
+    } catch (err) {
+      devLog({ op: 'thresholdPreview', ok: false, ms: Math.round(performance.now() - t0), percent, error: err?.message })
+    } finally {
+      st.inFlight = false
+      if (st.wanted != null && gen === st.gen) st.raf = requestAnimationFrame(() => pumpRef.current?.())
+    }
+  }
+
+  pumpRef.current = pumpPreview
+
+  const requestPreview = (percent) => {
+    if (!canPreview || !analysisResult) return
+    const st = previewRef.current
+    st.wanted = percent
+    if (st.inFlight || st.raf) return
+    st.raf = requestAnimationFrame(() => pumpRef.current?.())
+  }
+
+  // Full detection for the chosen threshold. Local: right away on release. Cloud (no preview): shortly after.
+  const scheduleDetect = (delayMs) => {
+    clearTimeout(detectTimer.current)
+    const wait = isLocal ? delayMs : Math.max(delayMs, CLOUD_DETECT_DELAY_MS)
+    const fire = () => runAnalysis({ after: 'threshold', quiet: true })
+    if (wait > 0) detectTimer.current = setTimeout(fire, wait)
+    else fire()
+  }
+  useEffect(() => () => {
+    clearTimeout(detectTimer.current)
+    cancelAnimationFrame(previewRef.current.raf)
+    const img = previewImgRef.current
+    if (isImageLayer(img)) { try { img.close() } catch { /* already closed */ } }
+  }, [])
+
+  // Moving the control switches Auto to Manual (the engine's 'fixed' mode). The automatic value stays
+  // as the flatten seed so the photo is flattened the same way either way.
+  const handleThresholdChange = (value, kind) => {
+    const cur = settingsRef.current
+    // only a real change leaves Auto (touching the thumb without moving it does not)
+    if (cur.threshold_mode !== 'fixed' && round1(value) === round1(thresholdShown)) return
+    if (cur.threshold_mode !== 'fixed' || cur.threshold_percent !== value) {
+      updateSettings(cur.threshold_mode === 'fixed'
+        ? { ...cur, threshold_percent: value }
+        : { ...cur, threshold_mode: 'fixed', threshold_percent: value, flatten_threshold_percent: cur.threshold_percent ?? DEFAULT_SETTINGS.threshold_percent })
+    }
+    if (kind !== 'release') requestPreview(value)
+    // nothing to detect when the last run already used exactly these inputs
+    const key = JSON.stringify([imageId, referencePoints, referencePhysicalMm, polygonPoints, settingsRef.current])
+    if (key === lastRunKey.current) { clearTimeout(detectTimer.current); return }
+    if (kind === 'release') scheduleDetect(0)
+    else if (kind === 'step') scheduleDetect(STEP_DETECT_DELAY_MS)
+  }
+
+  const handleThresholdAuto = () => {
+    const cur = settingsRef.current
+    if (cur.threshold_mode !== 'fixed') return
+    const seed = cur.flatten_threshold_percent ?? cur.threshold_percent ?? DEFAULT_SETTINGS.threshold_percent
+    updateSettings({ ...cur, threshold_mode: 'half_contrast', threshold_percent: seed, flatten_threshold_percent: null })
+    dropPreview()
+    scheduleDetect(0)
+  }
+
+  // ---- Limit area (the optional region, part of Threshold) ----
+  const startLimitArea = () => {
+    setMode('polygon')
+    say('Tap points around the grounds, then tap the first point to close the area.')
+  }
+  const finishLimitArea = () => {
+    // fewer than 3 points is no area: drop them
+    if (polygonPoints.length > 0 && polygonPoints.length < 3) setPolygonPoints([])
+    goThreshold()
+  }
+  const clearLimitArea = () => {
+    setPolygonPoints([])
+    goThreshold()
+  }
+  const handlePolygonClose = () => {
+    say(`Area limited to ${polygonPoints.length} points.`, 'success')
+    goThreshold()
+  }
 
   const applyErase = useCallback(async () => {
     if (!imageId || !erasePoints.length) return
@@ -639,7 +824,7 @@ export default function AnalyzerApp({ user }) {
       if (wasCancelled(err)) sayCancelled('Cancelled.')
       else say(`Erase failed: ${withHint(err)}`, 'error')
     } finally {
-      setBusy(false)
+      endBusy()
     }
   }, [imageId, erasePoints, eraseRadius, removedIds, client, isLocal, loadHistogram, analysisResult, histWeight])
 
@@ -699,7 +884,7 @@ export default function AnalyzerApp({ user }) {
       if (wasCancelled(err)) sayCancelled('Cancelled.')
       else say(`Compare failed: ${withHint(err)}`, 'error')
     } finally {
-      setBusy(false)
+      endBusy()
     }
   }
 
@@ -725,7 +910,7 @@ export default function AnalyzerApp({ user }) {
       if (wasCancelled(err)) sayCancelled('Cancelled.')
       else say(`Download failed: ${err.message}`, 'error')
     } finally {
-      setBusy(false)
+      endBusy()
       setDownloadsOpen(false)
     }
   }
@@ -739,7 +924,7 @@ export default function AnalyzerApp({ user }) {
       if (wasCancelled(err)) sayCancelled('Cancelled.')
       else say(`Download failed: ${err.message}`, 'error')
     } finally {
-      setBusy(false)
+      endBusy()
     }
   }
 
@@ -815,19 +1000,25 @@ export default function AnalyzerApp({ user }) {
 
       if (key === '1' && !event.shiftKey) {
         event.preventDefault()
-        setMode('reference')
+        uploadInputRef.current?.click()
         return
       }
 
       if (key === '2') {
         event.preventDefault()
-        setMode('polygon')
+        setMode('reference')
+        return
+      }
+
+      if (key === '3') {
+        event.preventDefault()
+        goThreshold()
         return
       }
 
       if (key === '4' && analysisResult) {
         event.preventDefault()
-        setMode('erase')
+        goErase()
         return
       }
 
@@ -855,7 +1046,8 @@ export default function AnalyzerApp({ user }) {
           applyErase()
           return
         }
-        runAnalysis()
+        // Enter detects again: in Clean up it stays there, anywhere else it lands in Threshold
+        runAnalysis({ after: mode === 'erase' ? 'erase' : 'threshold' })
       }
     }
 
@@ -866,6 +1058,8 @@ export default function AnalyzerApp({ user }) {
     applyErase,
     busy,
     clearActivePoints,
+    goThreshold,
+    goErase,
     erasePoints.length,
     kbdOpen,
     mode,
@@ -876,20 +1070,24 @@ export default function AnalyzerApp({ user }) {
 
   // ---- results card / phone sheet --------------------------------------------------------
   const hasResults = Boolean(analysisResult)
-  const detent = resultsHidden ? 'pill' : sheetDetent
+  // On a phone the Threshold step keeps the results to a one-line peek so the photo stays visible.
+  const peek = isPhone && (mode === 'threshold' || mode === 'polygon') && !sheetOpened
+  const detent = resultsHidden || peek ? 'pill' : sheetDetent
   const headline = headlineOf(summary)
 
-  const showResults = () => { setResultsHidden(false) }
+  const showResults = () => { setResultsHidden(false); setSheetOpened(true) }
   const hideResults = () => { setResultsHidden(true) }
   const sheetStepDown = () => {
-    if (resultsHidden) return
+    if (resultsHidden || peek) return
     if (sheetDetent === 'full') setSheetDetent('half')
     else setResultsHidden(true)
   }
   const sheetStepUp = () => {
+    setSheetOpened(true)
     if (resultsHidden) { setResultsHidden(false); setSheetDetent('half') } else setSheetDetent('full')
   }
   const sheetTap = () => {
+    if (peek) { setSheetOpened(true); setSheetDetent('half'); return }
     if (resultsHidden) { setResultsHidden(false); setSheetDetent('half') } else setSheetDetent((d) => (d === 'half' ? 'full' : 'half'))
   }
 
@@ -927,13 +1125,12 @@ export default function AnalyzerApp({ user }) {
     else if (e.key === 'ArrowUp') { e.preventDefault(); sheetStepUp() }
   }
 
-  const activeColor = STEPS.find((s) => s.id === mode)?.color ?? 'var(--el-text-2)'
+  const activeColor = 'var(--step-clean)'
   // Present the combined stats in µm even when the server's axis unit is mm.
   const rawUnit = cleanUnit(compare?.unit ?? 'mm')
   const unit = rawUnit
   const cscale = compare?.scale ?? 1
   const toUm = rawUnit === 'mm' ? 1000 : 1
-  const runLabel = mode === 'erase' && analysisResult ? 'Re-run' : 'Detect particles ⏎'
   const detectDisabled = busy || !canDetect
   const detectTitle = !canDetect ? 'Set the scale first' : 'Run particle detection (Enter)'
   const overlayOptions = ['original', 'threshold', 'clusters']
@@ -1124,7 +1321,7 @@ export default function AnalyzerApp({ user }) {
           <li className={stepDone.polygon ? 'done' : ''}><span aria-hidden="true">{stepDone.polygon ? '☑' : '☐'}</span> Region (optional)</li>
           <li><span aria-hidden="true">☐</span> Detect</li>
         </ul>
-        <button type="button" className="btn-primary btn-large" onClick={runAnalysis} disabled={detectDisabled} title={detectTitle}>
+        <button type="button" className="btn-primary btn-large" onClick={() => runAnalysis()} disabled={detectDisabled} title={detectTitle}>
           {busy && detecting ? 'Running…' : 'Run particle detection'}
         </button>
       </div>
@@ -1208,12 +1405,12 @@ export default function AnalyzerApp({ user }) {
           type="button"
           className="card-toggle"
           data-testid="results-toggle"
-          aria-expanded={!resultsHidden}
-          aria-label={resultsHidden ? 'Show results' : 'Hide results'}
-          onClick={() => (resultsHidden ? showResults() : hideResults())}
+          aria-expanded={detent !== 'pill'}
+          aria-label={detent === 'pill' ? 'Show results' : 'Hide results'}
+          onClick={() => (detent === 'pill' ? showResults() : hideResults())}
         >
-          {resultsHidden ? 'Show' : 'Hide'}
-          <span className={`toggle-chevron ${resultsHidden ? 'is-up' : ''}`}><ChevronIcon /></span>
+          {detent === 'pill' ? 'Show' : 'Hide'}
+          <span className={`toggle-chevron ${detent === 'pill' ? 'is-up' : ''}`}><ChevronIcon /></span>
         </button>
       </div>
       <div className="sheet-body">
@@ -1229,12 +1426,12 @@ export default function AnalyzerApp({ user }) {
   const settingsContent = (
     <Sidebar
       settings={settings}
-      onSettingsChange={setSettings}
+      onSettingsChange={updateSettings}
       isLocal={isLocal}
       referencePreset={referencePreset}
       onPresetChange={handlePresetChange}
       referencePhysicalMm={referencePhysicalMm}
-      onPhysicalMmChange={setReferencePhysicalMm}
+      onPhysicalMmChange={handleMmChange}
       onClose={isPhone ? undefined : () => closeSettings()}
       showTitle={!isPhone}
     />
@@ -1298,25 +1495,31 @@ export default function AnalyzerApp({ user }) {
         </Sheet>
       )}
 
+      <input ref={uploadInputRef} type="file" accept="image/*" onChange={handleUpload} disabled={busy} hidden data-testid="photo-input" />
+
       {imageSrc && (
-        <div className="toolbar">
+        <div className="toolbar" data-step={mode}>
           <ol className="stepper" aria-label="Steps">
             {STEPS.map((step) => {
-              const isCurrent = mode === step.id
+              const isCurrent = step.id === 'threshold' ? mode === 'threshold' || mode === 'polygon' : mode === step.id
               const isDone = !isCurrent && stepDone[step.id]
-              const isDisabled = !isCurrent && !isDone && step.id === 'erase' && !analysisResult
-              const detectBlocked = step.id === 'detect' && !canDetect
-              const onClick = step.id === 'detect' ? runAnalysis : () => setMode(step.id)
-              const disabled = busy || (step.id === 'erase' && !analysisResult) || detectBlocked
+              const needsScale = step.id === 'threshold' && !canDetect
+              const needsResult = step.id === 'erase' && !analysisResult
+              const disabled = busy || needsScale || needsResult
+              let onClick = () => setMode(step.id)
+              if (step.id === 'photo') onClick = () => uploadInputRef.current?.click()
+              else if (step.id === 'threshold') onClick = goThreshold
+              else if (step.id === 'erase') onClick = goErase
               let title = `Shortcut: ${step.key}`
-              if (step.id === 'erase' && !analysisResult) title = 'Run detection first'
-              else if (detectBlocked) title = 'Set the scale first'
+              if (step.id === 'photo') title = 'Choose another photo (1)'
+              else if (needsResult) title = 'Run detection first'
+              else if (needsScale) title = 'Set the scale first'
               return (
                 <li key={step.id}>
                   <button
                     type="button"
-                    className={`step ${isCurrent ? 'current' : ''} ${isDone ? 'done' : ''} ${(isDisabled || (disabled && !isCurrent && !isDone)) ? 'is-disabled' : ''}`}
-                    style={step.color ? { '--step-color': step.color } : undefined}
+                    className={`step ${isCurrent ? 'current' : ''} ${isDone ? 'done' : ''} ${(disabled && !isCurrent && !isDone) ? 'is-disabled' : ''}`}
+                    data-step={step.id}
                     aria-current={isCurrent ? 'step' : undefined}
                     onClick={onClick}
                     disabled={disabled}
@@ -1324,7 +1527,7 @@ export default function AnalyzerApp({ user }) {
                   >
                     <span className="step-n" aria-hidden="true">{isDone ? '✓' : step.n}</span>
                     <span className="step-label">{step.label}</span>
-                    {step.id === 'detect' && busy && detecting && <span className="spinner" aria-hidden="true" />}
+                    {step.id === 'threshold' && busy && detecting && <span className="spinner" aria-hidden="true" />}
                   </button>
                 </li>
               )
@@ -1334,13 +1537,73 @@ export default function AnalyzerApp({ user }) {
           <div className="toolbar-context" style={{ '--mode-color': activeColor }}>
             {mode === 'reference' && (
               <>
-                <span className="toolbar-hint">
-                  {referencePoints.length === 0 && 'Click one edge of the coin'}
-                  {referencePoints.length === 1 && 'Now the opposite edge'}
-                  {referencePoints.length === 2 && <>Scale set: <strong>{pixelScale?.toFixed(1)}</strong> px/mm</>}
+                <span className="toolbar-hint scale-hint">
+                  <RulerIcon />
+                  {referencePoints.length === 2 && pixelScale
+                    ? <>Scale set: <strong>{pixelScale.toFixed(1)}</strong> px/mm</>
+                    : referencePoints.length === 1 ? 'Now tap the other end' : scaleHint(referencePreset, referencePhysicalMm)}
                 </span>
-                <button type="button" className="ghost" onClick={undoActivePoints} disabled={!referencePoints.length}>Undo</button>
-                <button type="button" className="ghost" onClick={clearActivePoints} disabled={!referencePoints.length}>Clear</button>
+                <label className="toolbar-inline-field scale-mm">
+                  <input
+                    type="number"
+                    min={0.01}
+                    step={0.01}
+                    inputMode="decimal"
+                    aria-label="Reference length in millimetres"
+                    data-testid="scale-mm"
+                    value={Number.isNaN(referencePhysicalMm) ? '' : referencePhysicalMm}
+                    onChange={(event) => handleMmChange(parseFloat(event.target.value))}
+                  />
+                  mm
+                </label>
+                <select
+                  className="scale-preset"
+                  data-testid="scale-preset"
+                  aria-label="Reference object"
+                  value={referencePreset}
+                  onChange={(event) => handlePresetChange(event.target.value)}
+                >
+                  <option value="custom">Custom</option>
+                  {Object.entries(REFERENCE_OBJECTS).map(([name, mm]) => (
+                    <option key={name} value={name}>{name} ({mm} mm)</option>
+                  ))}
+                </select>
+                {referencePoints.length === 0 && referencePreset === 'custom' && referencePhysicalMm === DEFAULT_REFERENCE_MM && (
+                  <span className="toolbar-note">Default reference</span>
+                )}
+                {referencePoints.length > 0 && (
+                  <>
+                    <button type="button" className="ghost" onClick={undoActivePoints}>Undo</button>
+                    <button type="button" className="ghost" onClick={clearActivePoints}>Clear</button>
+                  </>
+                )}
+              </>
+            )}
+
+            {mode === 'threshold' && (
+              <>
+                <ThresholdControl
+                  mode={isManual ? 'manual' : 'auto'}
+                  value={thresholdShown}
+                  particles={analysisResult ? analysisResult.nclusters ?? null : null}
+                  updating={busy && busyQuiet}
+                  disabled={!canDetect}
+                  onChange={handleThresholdChange}
+                  onAuto={handleThresholdAuto}
+                />
+                <div className="threshold-actions">
+                  <button type="button" className="outline" data-testid="limit-area" onClick={startLimitArea} disabled={busy}>
+                    <PolygonIcon /> Limit area
+                  </button>
+                  <button type="button" className="btn-primary" data-testid="next-cleanup" onClick={nextCleanUp} disabled={!analysisResult || busy}>
+                    Next: Clean up ›
+                  </button>
+                  {regionClosed && (
+                    <span className="toolbar-note threshold-area-note">
+                      Area limited · <button type="button" className="link-button" data-testid="clear-area" onClick={clearLimitArea} disabled={busy}>Clear area</button>
+                    </span>
+                  )}
+                </div>
               </>
             )}
 
@@ -1348,11 +1611,12 @@ export default function AnalyzerApp({ user }) {
               <>
                 <span className="toolbar-hint">
                   {!regionClosed
-                    ? 'Optional: outline the grounds (3+ points) or skip to Detect'
-                    : `${polygonPoints.length}-point region · click the first point to close`}
+                    ? 'Tap points around the grounds (3 or more), then tap the first point to close'
+                    : `${polygonPoints.length}-point area · tap the first point to close`}
                 </span>
                 <button type="button" className="ghost" onClick={undoActivePoints} disabled={!polygonPoints.length}>Undo</button>
                 <button type="button" className="ghost" onClick={clearActivePoints} disabled={!polygonPoints.length}>Clear</button>
+                <button type="button" onClick={finishLimitArea}>{regionClosed ? 'Done' : 'Cancel'}</button>
               </>
             )}
 
@@ -1389,15 +1653,17 @@ export default function AnalyzerApp({ user }) {
             {mode === 'view' && <span className="toolbar-hint">Drag to pan · scroll or pinch to zoom</span>}
           </div>
 
-          <button
-            type="button"
-            className={`btn-primary toolbar-primary ${analysisResult && mode === 'erase' ? 'is-rerun' : ''}`}
-            onClick={runAnalysis}
-            disabled={detectDisabled}
-            title={detectTitle}
-          >
-            {busy && detecting ? 'Detecting…' : runLabel}
-          </button>
+          {mode === 'erase' && analysisResult && (
+            <button
+              type="button"
+              className="btn-primary toolbar-primary is-rerun"
+              onClick={() => runAnalysis({ after: 'erase' })}
+              disabled={detectDisabled}
+              title={detectTitle}
+            >
+              {busy && detecting ? 'Detecting…' : 'Re-run'}
+            </button>
+          )}
         </div>
       )}
 
@@ -1417,8 +1683,9 @@ export default function AnalyzerApp({ user }) {
             layerImage={layerImage}
             pixelScale={pixelScale}
             referenceMm={referencePhysicalMm}
+            referenceCircle={referencePreset !== 'custom'}
             onEraseRadiusChange={setEraseRadius}
-            onPolygonClose={() => say(`Region closed with ${polygonPoints.length} points.`, 'success')}
+            onPolygonClose={handlePolygonClose}
           />
         ) : (
           <div className="empty-state">
@@ -1461,7 +1728,7 @@ export default function AnalyzerApp({ user }) {
         {desktopCard}
         {phoneSheet}
 
-        {busy && imageSrc && (
+        {busy && !busyQuiet && imageSrc && (
           <div className="canvas-scrim">
             <div className="busy-card" role="status">
               <div className="busy-title"><span className="spinner" aria-hidden="true" />{busyLabel}</div>

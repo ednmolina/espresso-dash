@@ -55,6 +55,7 @@ test.describe('analyzer results card @ 1440px', () => {
     await analyze(page)
     await expect(page.locator('[data-testid=results-card]')).toBeVisible()
     await page.waitForTimeout(500) // spring-in animation
+    await page.locator('.hud-zoom').scrollIntoViewIfNeeded() // the Threshold card is tall; the HUD may sit below the fold
     const geo = await page.evaluate(() => {
       const r = (sel) => {
         const e = document.querySelector(sel)

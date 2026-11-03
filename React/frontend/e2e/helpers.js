@@ -97,9 +97,15 @@ export async function clickImage(page, x, y) {
   await page.mouse.click(p.x, p.y)
 }
 
-/** Two clicks 200 image-px apart on the coin step (default preset: US quarter, 24.26 mm). */
-export async function setScale(page) {
-  await page.keyboard.press('1')
+/**
+ * Two clicks 200 image-px apart on the Scale step. The default reference is Custom 20 mm; pass
+ * `{ preset: 'US Quarter' }` (or `{ mm: 24.26 }`) to measure against something else first. The second
+ * click moves to the Threshold step, which detects on its own (see `detect`, `waitForAutoDetect`).
+ */
+export async function setScale(page, { preset, mm } = {}) {
+  await page.keyboard.press('2')
+  if (preset) await page.locator('[data-testid=scale-preset]').selectOption(preset)
+  if (mm != null) await page.locator('[data-testid=scale-mm]').fill(String(mm))
   await clickImage(page, 100, 40)
   await clickImage(page, 300, 40)
 }
@@ -134,8 +140,25 @@ export async function waitForEngineOp(page, op, fromIndex = 0, { ok = true, time
   return handle.jsonValue()
 }
 
+/** Waits for the detection that the Threshold step starts by itself and returns its engine log entry. */
+export async function waitForAutoDetect(page, fromIndex = 0) {
+  const entry = await waitForEngineOp(page, 'analyze', fromIndex)
+  await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 60_000 })
+  return entry
+}
+
 /**
- * Presses Enter to detect and waits for the results. Local engine: resolves with the engine log entry
+ * On a phone the Threshold step keeps the results sheet collapsed to a one-line peek so the photo stays visible;
+ * this presses its Show button (a no-op on other layouts, or when the results are already open).
+ */
+export async function showResults(page) {
+  const toggle = page.locator('[data-testid=results-toggle]:visible').first()
+  if ((await toggle.count()) && (await toggle.getAttribute('aria-label')) === 'Show results') await toggle.click()
+}
+
+/**
+ * Presses Enter to detect and waits for the results. After `setScale` a detection is already running
+ * (Enter is ignored while busy), so this resolves with that run; otherwise Enter starts a new one. Local engine: resolves with the engine log entry
  * ({nclusters, summary, ms}); cloud engine (?engine=cloud): with the /analyze response body.
  */
 export async function detect(page) {
@@ -145,12 +168,14 @@ export async function detect(page) {
     const res = await analyze
     expect(res.status()).toBe(200)
     await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 60_000 })
+    await showResults(page)
     return res.json()
   }
   const from = await engineLogLength(page)
   await page.keyboard.press('Enter')
   const entry = await waitForEngineOp(page, 'analyze', from)
   await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 60_000 })
+  await showResults(page)
   return entry
 }
 
@@ -158,4 +183,53 @@ export async function detect(page) {
 export async function particleCount(page) {
   const text = await page.locator('.results-count').first().innerText()
   return Number(text.replace(/[^0-9]/g, ''))
+}
+
+/** Image-space position of a canvas point as page coordinates, for the current (possibly zoomed) view. */
+export async function canvasBox(page) {
+  return page.locator('canvas').first().boundingBox()
+}
+
+/**
+ * Dispatches raw touch events through CDP (Playwright has no multi-touch API).
+ * `points` = [{ x, y, id }, ...] in page coordinates; type is touchStart | touchMove | touchEnd | touchCancel.
+ */
+export async function cdpTouch(cdp, type, points) {
+  await cdp.send('Input.dispatchTouchEvent', {
+    type,
+    touchPoints: points.map((p) => ({ x: p.x, y: p.y, id: p.id ?? 0, radiusX: 4, radiusY: 4, force: 1 })),
+  })
+}
+
+/** A single-finger tap (press, hold `holdMs`, release) at page coordinates. */
+export async function cdpTap(page, cdp, x, y, holdMs = 40) {
+  await cdpTouch(cdp, 'touchStart', [{ x, y, id: 1 }])
+  await page.waitForTimeout(holdMs)
+  await cdpTouch(cdp, 'touchEnd', [])
+}
+
+/** Two fingers moving apart (pinch out) around (cx, cy), then lifting one finger after the other. */
+export async function cdpPinch(page, cdp, cx, cy, { from = 30, to = 110, steps = 6 } = {}) {
+  const at = (d) => [{ x: cx - d, y: cy, id: 1 }, { x: cx + d, y: cy, id: 2 }]
+  await cdpTouch(cdp, 'touchStart', at(from))
+  for (let i = 1; i <= steps; i++) {
+    await cdpTouch(cdp, 'touchMove', at(from + ((to - from) * i) / steps))
+    await page.waitForTimeout(16)
+  }
+  const d = to
+  // lift the first finger (the second stays down briefly), then the second
+  await cdpTouch(cdp, 'touchEnd', [{ x: cx + d, y: cy, id: 2 }])
+  await page.waitForTimeout(40)
+  await cdpTouch(cdp, 'touchEnd', [])
+}
+
+/** Number of strongly red pixels on the photo canvas (the threshold overlay paints coffee red). */
+export function redPixelCount(page) {
+  return page.evaluate(() => {
+    const c = document.querySelector('canvas')
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data
+    let n = 0
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 0 && d[i] > 180 && d[i] > d[i + 1] + 70 && d[i] > d[i + 2] + 70) n++
+    return n
+  })
 }

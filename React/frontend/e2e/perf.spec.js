@@ -58,7 +58,7 @@ test('12 MP photo: upload to results', async ({ page }) => {
     x: bb.x + (bb.width - W * z) / 2 + x * z,
     y: bb.y + (bb.height - H * z) / 2 + y * z,
   })
-  await page.keyboard.press('1')
+  await page.keyboard.press('2')
   for (const [x, y] of [[500, 200], [1300, 200]]) {
     const p = at(x, y)
     await page.mouse.click(p.x, p.y)
