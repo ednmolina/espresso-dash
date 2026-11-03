@@ -33,6 +33,8 @@ const fail = (message, status = 400) => {
 // ---------------------------------------------------------------- settings
 export const DEFAULT_SETTINGS = Object.freeze({
   threshold_percent: 58.8,
+  // Seed percent for the poly4 flatten's dark-pixel exclusion; null = use threshold_percent.
+  flatten_threshold_percent: null,
   reference_threshold: 0.4,
   max_cluster_axis: 100.0,
   min_surface: 5.0,
@@ -392,7 +394,12 @@ export function remeasureClusters(ds, axisMethod, volumeModel) {
 }
 
 // ---------------------------------------------------------------- analyze
-function thresholdMaskFor(blue, size, bgMedian, percent, polygonMask, into) {
+/** Percent that seeds the poly4 flatten: `flatten_threshold_percent` when set, else `threshold_percent`. */
+export function flattenSeedPercent(settings) {
+  return settings.flatten_threshold_percent ?? settings.threshold_percent
+}
+
+export function thresholdMaskFor(blue, size, bgMedian, percent, polygonMask, into) {
   const thr = bgMedian * percent / 100.0
   const mask = into || new Uint8Array(size)
   if (polygonMask) {
@@ -401,6 +408,27 @@ function thresholdMaskFor(blue, size, bgMedian, percent, polygonMask, into) {
     for (let i = 0; i < size; i++) mask[i] = blue[i] < thr ? 1 : 0
   }
   return mask
+}
+
+/**
+ * Threshold mask sampled every `step` pixels in both directions (output ceil(h/step) x ceil(w/step)),
+ * with exactly the rule of thresholdMaskFor. step = 1 is thresholdMaskFor.
+ */
+export function thresholdMaskStrided(blue, height, width, bgMedian, percent, polygonMask, step = 1) {
+  if (step <= 1) return thresholdMaskFor(blue, height * width, bgMedian, percent, polygonMask, null)
+  const ow = Math.ceil(width / step)
+  const oh = Math.ceil(height / step)
+  const thr = bgMedian * percent / 100.0
+  const out = new Uint8Array(ow * oh)
+  for (let r = 0; r < oh; r++) {
+    const src = r * step * width
+    const dst = r * ow
+    for (let c = 0; c < ow; c++) {
+      const i = src + c * step
+      out[dst + c] = (blue[i] < thr && (!polygonMask || polygonMask[i] !== 0)) ? 1 : 0
+    }
+  }
+  return out
 }
 
 /**
@@ -428,7 +456,7 @@ export function analyzeImageBlue(blue, height, width, settings, { onProgress, fl
   let flattenInfo = { applied: false }
   if (settings.background_model === 'poly4') {
     report('flatten', 0)
-    const flat = flattenBlue(blue, height, width, polygonMask, settings.threshold_percent,
+    const flat = flattenBlue(blue, height, width, polygonMask, flattenSeedPercent(settings),
       flattenCoefOverride ? { coefOverride: flattenCoefOverride } : undefined)
     blue = flat.blue
     flattenInfo = flat.info

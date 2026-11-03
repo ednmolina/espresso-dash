@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import ImageCanvas from './ImageCanvas'
 import Sidebar from './Sidebar'
+import ThresholdControl, { round1 } from './ThresholdControl'
 import ResultsPanel, { DistributionPanel, headlineOf } from './ResultsPanel'
 import HistogramChart, { SERIES_COLORS } from './HistogramChart'
 import GrindSettingPicker from './pages/GrindSettingPicker'
@@ -39,18 +40,28 @@ function writeHidden(hidden) {
   }
 }
 
+// Photo is done once an image is loaded (clicking it offers a new one); Limit area is part of Threshold.
 const STEPS = [
-  { id: 'reference', n: '1', label: 'Scale', key: '1', color: 'var(--step-scale)' },
-  { id: 'polygon', n: '2', label: 'Region', key: '2', color: 'var(--step-region)' },
-  { id: 'detect', n: '3', label: 'Detect', key: '↵' },
-  { id: 'erase', n: '4', label: 'Clean up', key: '4', color: 'var(--step-clean)' },
+  { id: 'photo', n: '1', label: 'Photo', key: '1' },
+  { id: 'reference', n: '2', label: 'Scale', key: '2' },
+  { id: 'threshold', n: '3', label: 'Threshold', key: '3' },
+  { id: 'erase', n: '4', label: 'Clean up', key: '4' },
 ]
 
+const DEFAULT_REFERENCE_MM = 20
+// Threshold preview: pixels in the preview layer (phones get a lighter one), and the pause before a
+// full detection after -/+ or a key press (Cloud Run has no preview, so it waits a little longer).
+const PREVIEW_MAX_PIXELS = 2_000_000
+const PREVIEW_MAX_PIXELS_PHONE = 1_000_000
+const STEP_DETECT_DELAY_MS = 300
+const CLOUD_DETECT_DELAY_MS = 400
+
 const SHORTCUTS = [
-  ['1', 'Scale: click both edges of the coin'],
-  ['2', 'Region: outline the grounds'],
-  ['Enter', 'Detect particles (or remove marked clusters)'],
+  ['1', 'Photo: choose another photo'],
+  ['2', 'Scale: tap both ends of a known length'],
+  ['3', 'Threshold: adjust what counts as coffee'],
   ['4', 'Clean up: mark stray clusters'],
+  ['Enter', 'Detect again (or remove marked clusters)'],
   ['V / Space', 'View mode: drag to pan'],
   ['Z / Backspace', 'Undo last point'],
   ['Esc', 'Clear points in this step / close this panel'],
@@ -141,6 +152,25 @@ const SPLIT_LABEL = 'Separating touching particles…'
 
 const isImageLayer = (l) => l != null && typeof l === 'object' && typeof l.close === 'function'
 
+// Dev-only trace shared with the engine log (e2e waits on it); nothing in production builds.
+function devLog(entry) {
+  if (!import.meta.env?.DEV || typeof window === 'undefined') return
+  ;(window.__grindEngineLog ??= []).push(entry)
+}
+
+function scaleHint(preset, mm) {
+  const len = Number.isFinite(mm) && mm > 0 ? mm : '…'
+  return preset === 'custom' ? `Tap both ends of ${len} mm on your ruler` : `Tap both edges of the ${preset} (${len} mm)`
+}
+
+function PolygonIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 3l8 5.5-3 10.5H7L4 8.5z" strokeDasharray="2.5 2.5" />
+    </svg>
+  )
+}
+
 export default function AnalyzerApp({ user }) {
   const [imageId, setImageId] = useState(null)
   const [imageSrc, setImageSrc] = useState(null)
@@ -148,8 +178,8 @@ export default function AnalyzerApp({ user }) {
   const [imageHeight, setImageHeight] = useState(0)
   const [mode, setMode] = useState('reference')
   const [referencePoints, setReferencePoints] = useState([])
-  const [referencePreset, setReferencePreset] = useState('US Quarter')
-  const [referencePhysicalMm, setReferencePhysicalMm] = useState(24.26)
+  const [referencePreset, setReferencePreset] = useState('custom')
+  const [referencePhysicalMm, setReferencePhysicalMm] = useState(DEFAULT_REFERENCE_MM)
   const [polygonPoints, setPolygonPoints] = useState([])
   const [settings, setSettings] = useState(DEFAULT_SETTINGS)
   const [analysisResult, setAnalysisResult] = useState(null)
@@ -189,6 +219,22 @@ export default function AnalyzerApp({ user }) {
   const cardRef = useRef(null)
   const dragRef = useRef(null)
   const layerRefs = useRef(new Set())
+  const uploadInputRef = useRef(null)
+
+  // Threshold step: the settings the next detection will use (read synchronously by queued runs),
+  // the live preview layer while the slider moves, and the bookkeeping for auto-detection.
+  const settingsRef = useRef(DEFAULT_SETTINGS)
+  const busyRef = useRef(false)
+  const pendingRunRef = useRef(null) // the latest detection asked for while one was running
+  const runRef = useRef(null) // the newest runAnalysis, for runs queued behind the current one
+  const lastRunKey = useRef(null) // inputs of the last successful detection
+  const wantDetectRef = useRef(false) // entering Threshold: detect once state has settled
+  const detectTimer = useRef(0)
+  const previewRef = useRef({ inFlight: false, wanted: null, raf: 0, gen: 0 })
+  const previewImgRef = useRef(null)
+  const [previewLayer, setPreviewLayer] = useState(null)
+  const [busyQuiet, setBusyQuiet] = useState(false) // a threshold re-run: no blocking card over the photo
+  const [, bump] = useState(0)
 
   // One swap point: the on-device engine by default, Cloud Run with ?engine=cloud.
   const userRef = useRef(user)
@@ -203,7 +249,8 @@ export default function AnalyzerApp({ user }) {
 
   const say = (text, tone = 'info') => setStatus({ text, tone })
 
-  const layer = overlayMode === 'original' ? null : layerOf(analysisResult, overlayMode)
+  const previewImage = overlayMode === 'threshold' ? previewLayer?.image ?? null : null
+  const layer = overlayMode === 'original' ? null : previewImage ?? layerOf(analysisResult, overlayMode)
   const layerB64 = typeof layer === 'string' ? layer : null
   const layerImage = layer != null && typeof layer !== 'string' ? layer : null
   const summary = analysisResult?.summary ?? null
@@ -217,11 +264,22 @@ export default function AnalyzerApp({ user }) {
   }
 
   const stepDone = {
+    photo: Boolean(imageSrc),
     reference: pixelScale != null,
     polygon: polygonPoints.length >= 3,
-    detect: analysisResult != null,
+    threshold: analysisResult != null,
     erase: removedIds.length > 0,
   }
+
+  // Everything a detection depends on: when it differs from the last run's, Threshold re-detects.
+  const inputsKey = JSON.stringify([imageId, referencePoints, referencePhysicalMm, polygonPoints, settings])
+
+  // Threshold control: Manual is the engine's 'fixed' mode; Auto shows the percent the engine chose.
+  const isManual = settings.threshold_mode === 'fixed'
+  const autoPercent = Number.isFinite(analysisResult?.threshold_percent_used)
+    ? analysisResult.threshold_percent_used
+    : settings.threshold_percent
+  const thresholdShown = isManual ? settings.threshold_percent : autoPercent
 
   useEffect(() => () => {
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current)
@@ -295,13 +353,31 @@ export default function AnalyzerApp({ user }) {
   // 'Detecting…' covers both detect labels (the split pass swaps the label while it runs)
   const detecting = busyLabel.startsWith('Detecting') || busyLabel === SPLIT_LABEL
 
-  const startBusy = (label) => {
+  const startBusy = (label, { quiet = false } = {}) => {
     // Detecting may first re-decode the photo (after a cancel), so decode only fills the
     // first tenth of the bar there instead of running it to 100% before detection starts.
     cancelLostRuns.current = false
     phaseRanges.current = label.startsWith('Detecting') ? { ...PHASE_RANGE, decode: [0, 0.1] } : PHASE_RANGE
-    setBusyLabel(label); setProgress(0); setBusy(true)
+    busyRef.current = true
+    setBusyLabel(label); setProgress(0); setBusyQuiet(quiet); setBusy(true)
   }
+
+  // Ends a busy period; the newest detection asked for meanwhile (a slider moved again) runs now.
+  const endBusy = () => {
+    busyRef.current = false
+    setBusy(false)
+    setBusyQuiet(false)
+    const queued = pendingRunRef.current
+    if (queued) {
+      pendingRunRef.current = null
+      setTimeout(() => runRef.current?.(queued), 0)
+    }
+  }
+
+  const updateSettings = useCallback((next) => {
+    settingsRef.current = next
+    setSettings(next)
+  }, [])
 
   // Cancel terminates the on-device worker, and the analyses stored in it die with it.
   const cancelBusy = () => {
@@ -328,7 +404,7 @@ export default function AnalyzerApp({ user }) {
     const file = input.files[0]
     if (!file) return
     input.value = ''
-    if (busy) return // uploads are serialised against running operations
+    if (busyRef.current) return // uploads are serialised against running operations
     const seq = ++uploadSeq.current
 
     const loadingText = isLocal ? 'Loading photo…' : 'Uploading…'
@@ -371,6 +447,16 @@ export default function AnalyzerApp({ user }) {
       objectUrlRef.current = src.startsWith('blob:') ? src : null
 
       histSeq.current += 1
+      pendingRunRef.current = null
+      wantDetectRef.current = false
+      lastRunKey.current = null
+      clearTimeout(detectTimer.current)
+      dropPreview()
+      // a new photo starts from the automatic threshold again
+      const cur = settingsRef.current
+      if (cur.threshold_mode === 'fixed' && cur.flatten_threshold_percent != null) {
+        updateSettings({ ...cur, threshold_mode: 'half_contrast', threshold_percent: cur.flatten_threshold_percent, flatten_threshold_percent: null })
+      }
       setImageId(data.image_id)
       setImageSrc(src)
       setImageWidth(data.width)
@@ -385,18 +471,20 @@ export default function AnalyzerApp({ user }) {
       setHistogramLoading(false)
       setHistExpanded(false)
       setMode('reference')
-      say('Click one edge of your reference coin to set the scale.')
+      say(`${scaleHint(referencePreset, referencePhysicalMm)}.`)
     } catch (err) {
       if (seq !== uploadSeq.current) return
       if (wasCancelled(err)) sayCancelled('Cancelled.')
       else say(`${isLocal ? 'Could not load the photo' : 'Upload failed'}: ${err.message}`, 'error')
     } finally {
-      if (seq === uploadSeq.current) setBusy(false)
+      if (seq === uploadSeq.current) endBusy()
     }
   }
 
   const handlePointAdded = useCallback((x, y) => {
     if (mode === 'reference') {
+      // the second tap completes the scale and moves on to Threshold (see the effect below)
+      if (referencePoints.length === 1) wantDetectRef.current = true
       setReferencePoints((prev) => {
         const next = [...prev, { x, y }]
         return next.length > 2 ? next.slice(-1) : next
@@ -406,19 +494,24 @@ export default function AnalyzerApp({ user }) {
     } else if (mode === 'erase') {
       setErasePoints((prev) => [...prev, { x, y }])
     }
-  }, [mode])
+  }, [mode, referencePoints.length])
 
-  // Keep the status line in step with the scale clicks.
+  // Keep the status line in step with the scale taps.
   useEffect(() => {
     if (mode !== 'reference') return
-    if (referencePoints.length === 1) say('Now the opposite edge of the coin.')
+    if (referencePoints.length === 1) say('Now tap the other end.')
     else if (referencePoints.length === 2 && pixelScale) say(`Scale set: ${pixelScale.toFixed(1)} px/mm`, 'success')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [referencePoints.length])
 
+  // Picking a coin fills its size; typing a size makes the reference Custom.
   const handlePresetChange = (name) => {
     setReferencePreset(name)
     if (REFERENCE_OBJECTS[name]) setReferencePhysicalMm(REFERENCE_OBJECTS[name])
+  }
+  const handleMmChange = (mm) => {
+    setReferencePhysicalMm(mm)
+    setReferencePreset('custom')
   }
 
   const undoActivePoints = useCallback(() => {

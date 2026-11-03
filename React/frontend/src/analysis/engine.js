@@ -5,7 +5,10 @@
 // vitest/node. Errors are thrown as Error(detail) with `.status` set, using the server's
 // detail strings verbatim.
 
-import { makeSettings, analyzeImageBlue, clustersWithinRadius, thresholdIndexLayer, clusterIndexLayer } from './detect.js'
+import {
+  makeSettings, analyzeImageBlue, clustersWithinRadius, thresholdIndexLayer, clusterIndexLayer,
+  flattenSeedPercent, thresholdMaskStrided,
+} from './detect.js'
 import { filterDatasetByClusterIds, dropPixels } from './dataset.js'
 import { summaryOrNone, particlesPayload, shapeSummaryOrNone } from './summary.js'
 import { histogramFromStored, compareFromStored } from './histogram.js'
@@ -83,6 +86,7 @@ function checkPoints(body, field, { min = 0, max }) {
 function validateAnalyze(body) {
   if (typeof body?.image_id !== 'string' || !body.image_id) throw bad('image_id', 'Field required')
   checkNumber(body, 'threshold_percent', { min: 1, max: 100 })
+  checkNumber(body, 'flatten_threshold_percent', { min: 1, max: 100 })
   checkNumber(body, 'reference_threshold', { min: 0, max: 1 })
   checkNumber(body, 'max_cost', { min: 0 })
   checkNumber(body, 'max_cluster_axis', { min: 1, max: 200 })
@@ -102,6 +106,14 @@ function validateAnalyze(body) {
   checkNumber(body, 'split_neck_ratio', { min: 0.3, max: 0.95 })
   checkNumber(body, 'min_diameter_um', { min: 0, max: 100000 })
   checkNumber(body, 'click_sigma_px', { min: 0, max: 100 })
+}
+
+function validatePreview(body) {
+  if (typeof body?.image_id !== 'string' || !body.image_id) throw bad('image_id', 'Field required')
+  if (body.threshold_percent === undefined || body.threshold_percent === null) throw bad('threshold_percent', 'Field required')
+  checkNumber(body, 'threshold_percent', { min: 1, max: 100 })
+  const mp = body.max_pixels
+  if (mp !== undefined && mp !== null && !(typeof mp === 'number' && mp >= 1)) throw bad('max_pixels', 'Input should be greater than or equal to 1')
 }
 
 function validateErase(body) {
@@ -175,6 +187,26 @@ function phaseReporter(onProgress) {
   }
 }
 
+/** Analysis size for an image: the scale (analysis_scale_pct, 10-100), capped at MAX_ANALYSIS_PIXELS. */
+function analysisDims(img, scalePct) {
+  const W = img.fullWidth
+  const H = img.fullHeight
+  let s = (scalePct ?? 100) / 100
+  if (W * H * s * s > MAX_ANALYSIS_PIXELS) s = Math.sqrt(MAX_ANALYSIS_PIXELS / (W * H))
+  // A photo that was already shrunk at decode time (iOS memory fallback) cannot be
+  // analysed at a finer scale than it was decoded at. Parity with the server is
+  // tolerance-only on that path.
+  if (img.decodeScale < 1) s = Math.min(s, img.decodeScale)
+  let tw = Math.max(1, roundHalfEven(W * s))
+  let th = Math.max(1, roundHalfEven(H * s))
+  if (img.decodeScale < 1 && Math.abs(tw - img.width) <= 1 && Math.abs(th - img.height) <= 1) {
+    tw = img.width
+    th = img.height
+    s = img.width / W
+  }
+  return { s, tw, th }
+}
+
 export function createEngine() {
   /** image_id -> {width, height, fullWidth, fullHeight, decodeScale, blue}; the latest image only. */
   const images = new Map()
@@ -182,6 +214,8 @@ export function createEngine() {
   const results = new Map()
   /** The most recent resized copy of the latest image: {imageId, width, height, blue}. */
   let resized = null
+  /** Threshold-preview cache of the latest analysis: {sig, analysis_id, blue, bg, polygonMask, width, height} | null. */
+  let previewCache = null
 
   const putResult = (keys, stored) => {
     for (const key of keys) {
@@ -226,6 +260,7 @@ export function createEngine() {
     if (!blue || blue.length !== width * height) throw httpError(400, 'Could not decode image.')
     images.clear() // latest image only
     resized = null
+    previewCache = null
     freezeResults(null)
     images.set(image_id, { width, height, fullWidth: fw, fullHeight: fh, decodeScale, blue })
     return { image_id, width: fw, height: fh, reference_objects: { ...REFERENCE_OBJECTS_MM } }
@@ -234,6 +269,7 @@ export function createEngine() {
   function dropImage(imageId) {
     images.delete(imageId)
     if (resized?.imageId === imageId) resized = null
+    if (previewCache?.sig.image_id === imageId) previewCache = null
   }
 
   const hasImage = (id) => images.has(id)
@@ -254,21 +290,7 @@ export function createEngine() {
     const img = images.get(body.image_id)
     if (!img) throw httpError(404, 'Image not found. Upload first.')
 
-    const W = img.fullWidth
-    const H = img.fullHeight
-    let s = (body.analysis_scale_pct ?? 100) / 100
-    if (W * H * s * s > MAX_ANALYSIS_PIXELS) s = Math.sqrt(MAX_ANALYSIS_PIXELS / (W * H))
-    // A photo that was already shrunk at decode time (iOS memory fallback) cannot be
-    // analysed at a finer scale than it was decoded at. Parity with the server is
-    // tolerance-only on that path.
-    if (img.decodeScale < 1) s = Math.min(s, img.decodeScale)
-    let tw = Math.max(1, roundHalfEven(W * s))
-    let th = Math.max(1, roundHalfEven(H * s))
-    if (img.decodeScale < 1 && Math.abs(tw - img.width) <= 1 && Math.abs(th - img.height) <= 1) {
-      tw = img.width
-      th = img.height
-      s = img.width / W
-    }
+    const { s, tw, th } = analysisDims(img, body.analysis_scale_pct)
 
     let pixelScale = null
     let pxLength = null
@@ -287,6 +309,7 @@ export function createEngine() {
 
     const overrides = {
       threshold_percent: body.threshold_percent,
+      flatten_threshold_percent: body.flatten_threshold_percent,
       reference_threshold: body.reference_threshold,
       max_cluster_axis: body.max_cluster_axis,
       min_surface: body.min_surface,
@@ -335,6 +358,23 @@ export function createEngine() {
     freezeResults(stored)
     const analysisId = `${body.image_id}.${hex12()}`
     putResult([body.image_id, analysisId], stored)
+    // References only (result.blue is the flattened channel, owned by nobody else): no copies.
+    previewCache = {
+      sig: {
+        image_id: body.image_id,
+        width: tw,
+        height: th,
+        polygon: polygon ? body.polygon_points.map(([x, y]) => [x, y]) : null,
+        background_model: settings.background_model,
+        flatten_seed: settings.background_model === 'poly4' ? flattenSeedPercent(settings) : null,
+      },
+      analysis_id: analysisId,
+      blue: result.blue,
+      bg: backgroundMedian,
+      polygonMask: result.polygon_mask,
+      width: tw,
+      height: th,
+    }
 
     const t1 = now()
     const payload = finiteOrNull({
@@ -360,6 +400,52 @@ export function createEngine() {
     payload.threshold_layer = thresholdLayer
     payload.cluster_layer = clusterLayer
     return payload
+  }
+
+  /**
+   * Threshold overlay for another percent on the latest analysis (no re-flatten, no detection).
+   * body: { image_id, threshold_percent, max_pixels = 2e6, analysis_id?, polygon_points?, background_model?,
+   *         flatten_threshold_percent?, analysis_scale_pct? }.
+   * The optional fields must agree with the analysis the cache was built from, else the answer is stale.
+   * Returns { stale: true } or { threshold_layer, threshold_percent, width, height, source_width,
+   * source_height, step, timings_ms }.
+   */
+  function thresholdPreview(body) {
+    const t0 = now()
+    validatePreview(body)
+    const c = previewCache
+    if (!c || c.sig.image_id !== body.image_id) return { stale: true }
+    const img = images.get(body.image_id)
+    if (!img) return { stale: true }
+    if (body.analysis_id != null && body.analysis_id !== c.analysis_id) return { stale: true }
+    if (body.analysis_scale_pct != null) {
+      const d = analysisDims(img, body.analysis_scale_pct)
+      if (d.tw !== c.width || d.th !== c.height) return { stale: true }
+    }
+    if (body.polygon_points !== undefined) {
+      const given = Array.isArray(body.polygon_points) && body.polygon_points.length >= 3 ? body.polygon_points : null
+      if (JSON.stringify(given) !== JSON.stringify(c.sig.polygon)) return { stale: true }
+    }
+    if (body.background_model != null && body.background_model !== c.sig.background_model) return { stale: true }
+    if (typeof body.flatten_threshold_percent === 'number' && c.sig.flatten_seed !== null && c.sig.flatten_seed !== body.flatten_threshold_percent) return { stale: true }
+
+    const percent = Number(body.threshold_percent)
+    const maxPixels = body.max_pixels ?? 2_000_000
+    const total = c.width * c.height
+    const step = total > maxPixels ? Math.ceil(Math.sqrt(total / maxPixels)) : 1
+    const mask = thresholdMaskStrided(c.blue, c.height, c.width, c.bg, percent, c.polygonMask, step)
+    const ow = Math.ceil(c.width / step)
+    const oh = Math.ceil(c.height / step)
+    return {
+      threshold_layer: thresholdIndexLayer(mask, oh, ow),
+      threshold_percent: percent,
+      width: ow,
+      height: oh,
+      source_width: c.width,
+      source_height: c.height,
+      step,
+      timings_ms: { total: Math.round(now() - t0) },
+    }
   }
 
   function erase(body) {
@@ -425,5 +511,5 @@ export function createEngine() {
     return compareFromStored(storedList, req)
   }
 
-  return { registerImage, analyze, erase, histogram, compare, hasImage, dropImage }
+  return { registerImage, analyze, thresholdPreview, erase, histogram, compare, hasImage, dropImage }
 }

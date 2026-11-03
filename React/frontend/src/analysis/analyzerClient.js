@@ -105,6 +105,8 @@ export function createAnalyzerClient({ getUser } = {}) {
       mode,
       request: (path, opts) => apiRequest(getUser?.() ?? null, path, opts),
       cancel() { return false },
+      // The Cloud Run API has no live threshold preview.
+      thresholdPreview: async () => ({ unsupported: true }),
       onProgress: () => () => {},
       dispose() {},
     }
@@ -178,6 +180,11 @@ export function createAnalyzerClient({ getUser } = {}) {
       // true when the cancel also dropped the stored analyses (the worker was terminated)
       return engine.cancel()
     },
+    /**
+     * Threshold overlay for another percent on the latest analysis, without re-running it.
+     * Resolves { stale: true } when nothing matching is cached. Never calls cancel().
+     */
+    thresholdPreview: (body) => engine.thresholdPreview(body),
     onProgress: (cb) => engine.onProgress(cb),
     dispose: disposeLocalEngine,
   }
