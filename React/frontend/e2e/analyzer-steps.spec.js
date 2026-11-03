@@ -1,8 +1,8 @@
-// The four-step analyzer flow (Photo, Scale, Threshold, Clean up): the default reference, the automatic move
-// to Threshold, touch gestures that must never leave a mark, and the live threshold control.
+// The five-step analyzer flow (Photo, Scale, Area, Threshold, Clean up): the default reference, the move
+// to Area (nothing detects before it), touch gestures that must never leave a mark, and the live threshold control.
 import { test, expect } from '@playwright/test'
 import {
-  openAnalyzer, uploadFixture, setScale, detect, trackErrors, imageToPage,
+  openAnalyzer, uploadFixture, setScale, setScaleAndArea, useWholePhoto, drawArea, detect, trackErrors, imageToPage,
   engineLogLength, waitForEngineOp, waitForAutoDetect, cdpTouch, cdpTap, cdpPinch, redPixelCount,
 } from './helpers.js'
 
@@ -37,33 +37,44 @@ for (const vp of VIEWPORTS) {
       await expect(page.locator('.toolbar-hint')).toContainText('Tap both ends of 21 mm')
     })
 
-    test('steps run Photo, Scale, Threshold, Clean up; the second scale tap opens Threshold and detects', async ({ page }) => {
+    test('steps run Photo, Scale, Area, Threshold, Clean up; the second scale tap opens Area, the closed area opens Threshold and detects', async ({ page }) => {
       const errors = trackErrors(page)
       await openAnalyzer(page)
       await uploadFixture(page)
-      await expect(page.locator('.stepper .step-label')).toHaveText(['Photo', 'Scale', 'Threshold', 'Clean up'])
+      await expect(page.locator('.stepper .step-label')).toHaveText(['Photo', 'Scale', 'Area', 'Threshold', 'Clean up'])
       const step = (id) => page.locator(`.step[data-step=${id}]`)
       await expect(step('photo')).toHaveClass(/done/) // an image is loaded
       await expect(step('reference')).toHaveAttribute('aria-current', 'step')
+      await expect(step('polygon')).toBeDisabled() // needs the scale
       await expect(step('threshold')).toBeDisabled()
       await expect(step('erase')).toBeDisabled()
 
       const from = await engineLogLength(page)
       await setScale(page)
-      const entry = await waitForAutoDetect(page, from)
-      expect(entry.nclusters).toBeGreaterThan(10)
-      await expect(step('threshold')).toHaveAttribute('aria-current', 'step')
+      await expect(step('polygon')).toHaveAttribute('aria-current', 'step')
       await expect(step('reference')).toHaveClass(/done/)
+      await expect(page.getByTestId('area-hint')).toHaveText('Tap around the coffee grounds, then tap the first point to close the area.')
+      await expect(step('threshold')).toBeDisabled()
+      await expect(step('threshold')).toHaveAttribute('title', 'Select the area first')
+      await expect(step('erase')).toBeDisabled()
+      await page.waitForTimeout(400)
+      expect(await engineLogLength(page)).toBe(from) // nothing detected yet
+
+      await drawArea(page)
+      const entry = await waitForAutoDetect(page, from)
+      expect(entry.nclusters).toBeGreaterThan(0)
+      await expect(step('threshold')).toHaveAttribute('aria-current', 'step')
+      await expect(step('polygon')).toHaveClass(/done/)
       await expect(page.getByTestId('threshold-control')).toBeVisible()
       await expect(page.getByTestId('threshold-chip')).toHaveText('Auto')
       await expect(page.getByTestId('threshold-value')).toHaveText(/^\d+\.\d%$/)
       await expect(page.getByTestId('threshold-count')).toContainText(String(entry.nclusters))
-      await expect(page.getByRole('button', { name: /^Limit area$/ })).toBeVisible()
+      await expect(page.getByRole('button', { name: /^Limit area$/ })).toHaveCount(0) // the Area step replaced it
 
       await page.getByTestId('next-cleanup').click()
       await expect(step('erase')).toHaveAttribute('aria-current', 'step')
       await expect(page.getByRole('button', { name: /^Remove/ })).toBeDisabled()
-      await page.keyboard.press('3') // back: nothing changed, so no new detection
+      await page.keyboard.press('4') // back: nothing changed, so no new detection
       const n = await engineLogLength(page)
       await page.waitForTimeout(300)
       expect(await engineLogLength(page)).toBe(n)
@@ -71,30 +82,32 @@ for (const vp of VIEWPORTS) {
       expect(errors).toEqual([])
     })
 
-    test('Limit area re-detects when the area closes, and the area can be cleared', async ({ page }) => {
+    test('changing the area re-detects when Threshold opens again; Use whole photo goes back to the full photo', async ({ page }) => {
       await openAnalyzer(page)
       await uploadFixture(page)
       await setScale(page)
-      const first = await waitForAutoDetect(page)
-      await page.getByTestId('limit-area').click()
-      const from = await engineLogLength(page)
-      // a small triangle on the grid (kept inside the first screenful), closed by tapping the first point again
-      for (const [x, y] of [[150, 150], [480, 150], [480, 330]]) {
-        const p = await imageToPage(page, x, y)
-        await page.mouse.click(p.x, p.y)
-      }
-      const start = await imageToPage(page, 150, 150)
-      await page.mouse.click(start.x, start.y)
-      const entry = await waitForEngineOp(page, 'analyze', from)
-      expect(entry.nclusters).toBeLessThan(first.nclusters)
-      await expect(page.locator('.step[data-step=threshold]')).toHaveAttribute('aria-current', 'step')
-      await expect(page.getByTestId('clear-area')).toBeVisible()
+      const from0 = await engineLogLength(page)
+      await drawArea(page) // a small triangle on the grid, closed by tapping the first point again
+      const first = await waitForAutoDetect(page, from0)
 
-      const from2 = await engineLogLength(page)
-      await page.getByTestId('clear-area').click()
-      const again = await waitForEngineOp(page, 'analyze', from2)
-      expect(again.nclusters).toBe(first.nclusters)
-      await expect(page.getByTestId('clear-area')).toHaveCount(0)
+      // back to Area: the outline is still there; Clear re-opens it, so Threshold waits until it is closed again
+      await page.keyboard.press('3')
+      await expect(page.locator('.step[data-step=polygon]')).toHaveAttribute('aria-current', 'step')
+      await page.getByTestId('area-clear').click()
+      await expect(page.locator('.step[data-step=threshold]')).toBeDisabled()
+      const from = await engineLogLength(page)
+      await useWholePhoto(page)
+      const whole = await waitForEngineOp(page, 'analyze', from)
+      expect(whole.nclusters).toBeGreaterThan(first.nclusters)
+      await expect(page.locator('.step[data-step=threshold]')).toHaveAttribute('aria-current', 'step')
+
+      // going back and out again without changing the area does not detect again
+      await page.keyboard.press('3')
+      await page.keyboard.press('4')
+      const n = await engineLogLength(page)
+      await page.waitForTimeout(400)
+      expect(await engineLogLength(page)).toBe(n)
+      await expect(page.locator('.step[data-step=threshold]')).toHaveAttribute('aria-current', 'step')
     })
 
     test.describe('touch gestures never add points', () => {
@@ -134,11 +147,10 @@ for (const vp of VIEWPORTS) {
         await expect(hint).toContainText('Now tap the other end') // still one
       })
 
-      test('Limit area', async ({ page }) => {
+      test('Area', async ({ page }) => {
         await setScale(page)
-        await waitForAutoDetect(page)
-        await page.getByTestId('limit-area').click()
-        const undo = page.getByRole('button', { name: 'Undo' })
+        const from = await engineLogLength(page)
+        const undo = page.getByRole('button', { name: 'Undo last point' })
         await expect(undo).toBeDisabled()
         await cdpPinch(page, cdp, centre.x, centre.y)
         await longPress(page, centre.x - 80, centre.y)
@@ -154,12 +166,13 @@ for (const vp of VIEWPORTS) {
         await expect(undo).toBeDisabled()
         await cdpPinch(page, cdp, centre.x, centre.y + 30)
         await expect(undo).toBeDisabled()
+        expect(await engineLogLength(page)).toBe(from) // none of it started a detection
       })
 
       test('Clean up', async ({ page }) => {
-        await setScale(page)
+        await setScaleAndArea(page)
         await waitForAutoDetect(page)
-        await page.keyboard.press('4')
+        await page.keyboard.press('5')
         const remove = page.locator('.toolbar').getByRole('button', { name: /^Remove/ })
         await expect(remove).toHaveText('Remove')
 
@@ -196,7 +209,7 @@ for (const vp of VIEWPORTS) {
       const errors = trackErrors(page)
       await openAnalyzer(page)
       await uploadFixture(page)
-      await setScale(page)
+      await setScaleAndArea(page)
       await waitForAutoDetect(page)
       const autoValue = await sliderValue(page)
       const autoCount = await countText(page)
@@ -262,7 +275,7 @@ for (const vp of VIEWPORTS) {
     test('Cancel stops a detection for good: a queued threshold re-detect does not restart it', async ({ page }) => {
       await openAnalyzer(page, '?engineDelay=2500')
       await uploadFixture(page)
-      await setScale(page)
+      await setScaleAndArea(page)
       await waitForAutoDetect(page)
       // '+' arms the debounced threshold detection (300 ms); Enter starts a full detection first, so when the
       // timer fires it finds the engine busy and is queued behind it
@@ -284,7 +297,7 @@ for (const vp of VIEWPORTS) {
     test('Enter detects again and Next still reaches Clean up', async ({ page }) => {
       await openAnalyzer(page)
       await uploadFixture(page)
-      await setScale(page)
+      await setScaleAndArea(page)
       await waitForAutoDetect(page)
       const entry = await detect(page)
       expect(entry.nclusters).toBeGreaterThan(10)

@@ -3,7 +3,7 @@
 // That path is only used with ?engine=cloud (the default engine runs on the device).
 import { test, expect } from '@playwright/test'
 import {
-  openAnalyzer, uploadFixture, setScale, detect, clickImage, particleCount, trackErrors, GRID,
+  openAnalyzer, uploadFixture, setScaleAndArea, detect, clickImage, particleCount, trackErrors, GRID,
 } from './helpers.js'
 import { installOldApi } from './stubs/oldApi.js'
 
@@ -15,7 +15,7 @@ async function analyzeWithStub(page, opts) {
   const api = await installOldApi(page, opts)
   await openAnalyzer(page, '?engine=cloud')
   await uploadFixture(page)
-  await setScale(page)
+  await setScaleAndArea(page)
   await detect(page)
   return api
 }
@@ -53,7 +53,7 @@ test.describe('analyzer against the old backend', () => {
     const api = await analyzeWithStub(page)
     const before = await particleCount(page)
     expect(before).toBe(24)
-    await page.keyboard.press('4')
+    await page.keyboard.press('5')
     await clickImage(page, GRID.xs[2], GRID.ys[1])
     const erase = page.waitForResponse((r) => r.url().includes('/erase'))
     await page.keyboard.press('Enter')
@@ -78,7 +78,7 @@ test.describe('analyzer against the old backend', () => {
     await expect(page.getByText(/saved/i).first()).toBeVisible()
     await expect(save).toBeDisabled() // the same analysis can't be saved twice
     // erase one particle: different removed clusters, so a second run
-    await page.keyboard.press('4')
+    await page.keyboard.press('5')
     await clickImage(page, GRID.xs[2], GRID.ys[1])
     const erase = page.waitForResponse((r) => r.url().includes('/erase'))
     await page.keyboard.press('Enter')

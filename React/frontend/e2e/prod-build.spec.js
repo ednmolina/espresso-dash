@@ -10,7 +10,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { gotoWorkspace, uploadFixture, setScale, trackErrors } from './helpers.js'
+import { gotoWorkspace, uploadFixture, setScaleAndArea, trackErrors } from './helpers.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const frontend = path.resolve(here, '..')
@@ -71,7 +71,7 @@ test.describe('production build under /espresso-dash/', () => {
     await page.goto(`http://localhost:${PORT}${BASE}e2e/harness/index.html`)
     await gotoWorkspace(page, 'analyzer')
     await uploadFixture(page)
-    await setScale(page)
+    await setScaleAndArea(page)
     await page.keyboard.press('Enter')
     await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 60_000 })
     await expect(page.locator('.results-count').first()).toContainText(/\d/)

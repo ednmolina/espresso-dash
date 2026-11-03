@@ -3,7 +3,7 @@
 // All on-device (no backend); the old-API stub covers the cloud request body.
 import { test, expect } from '@playwright/test'
 import {
-  openAnalyzer, openHarness, gotoWorkspace, uploadFixture, setScale, detect, showAllPoints, trackErrors,
+  openAnalyzer, openHarness, gotoWorkspace, uploadFixture, setScaleAndArea, detect, showAllPoints, trackErrors,
   horizontalOverflow, TOUCHING_FIXTURE, clickImage, engineLogLength, waitForEngineOp,
 } from './helpers.js'
 import { installOldApi } from './stubs/oldApi.js'
@@ -34,7 +34,7 @@ async function analyzeTouching(page, { separate = false, phone = false } = {}) {
     await page.locator('[data-testid=split-toggle]').check()
     await closeSettings(page, phone)
   }
-  await setScale(page)
+  await setScaleAndArea(page)
   return detect(page)
 }
 
@@ -75,7 +75,7 @@ for (const size of SIZES) {
       const errors = trackErrors(page)
       await openAnalyzer(page)
       await uploadFixture(page)
-      await setScale(page)
+      await setScaleAndArea(page)
       await detect(page)
       const shape = page.locator('[data-testid=shape-line]')
       await expect(shape).toContainText(/Shape\s+\d\.\d\d : 1/)
@@ -128,7 +128,7 @@ for (const size of SIZES) {
       await expect(page.locator('.metric', { hasText: 'Dv90 unseparated' })).toContainText('at detection')
       // a clean-up does not change the note (analysis-time values)
       const text = await note.innerText()
-      await page.keyboard.press('4')
+      await page.keyboard.press('5')
       await page.keyboard.press('Escape')
       expect(await note.innerText()).toBe(text)
       expect(await horizontalOverflow(page)).toBe(0)
@@ -243,7 +243,7 @@ test.describe('Photo analysis checks follow the current photo and clean-up', () 
     await openSettings(page)
     await page.locator('[data-testid=split-toggle]').check()
     await closeSettings(page, false)
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
 
     const note = page.locator('[data-testid=split-note]')
@@ -254,7 +254,7 @@ test.describe('Photo analysis checks follow the current photo and clean-up', () 
     await expect(metric).not.toContainText('before clean-up')
 
     // erase the disc at the centre of the first grid cell
-    await page.keyboard.press('4')
+    await page.keyboard.press('5')
     await clickImage(page, 110, 150)
     const from = await engineLogLength(page)
     await page.keyboard.press('Enter')
@@ -316,7 +316,7 @@ test.describe('busy label while a split is running', () => {
     await uploadFixture(page, TOUCHING_FIXTURE)
 
     // off: the label never changes
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
     const offLabels = await page.evaluate(() => window.__busyLabels.slice())
     expect(offLabels.join('|')).toContain('Detecting particles…')
@@ -404,7 +404,7 @@ test.describe('?engine=cloud has no separation options', () => {
     const api = await installOldApi(page)
     await openAnalyzer(page, '?engine=cloud')
     await uploadFixture(page)
-    await setScale(page)
+    await setScaleAndArea(page)
     await detect(page)
     const analyze = api.calls.find((c) => c.path === '/analyze')
     expect(analyze).toBeTruthy()

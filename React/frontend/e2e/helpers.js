@@ -94,27 +94,68 @@ export async function imageToPage(page, x, y) {
 
 export async function clickImage(page, x, y) {
   const p = await imageToPage(page, x, y)
+  // page.mouse.click lands on whatever is on top; fail loudly if an overlay (zoom HUD, overlay buttons,
+  // results sheet) covers the photo there, instead of silently losing the tap.
+  const hit = await page.evaluate(([px, py]) => {
+    const el = document.elementFromPoint(px, py)
+    return el && el.tagName === 'CANVAS' ? null : (el ? `${el.tagName}.${el.className}` : 'nothing')
+  }, [p.x, p.y])
+  if (hit) throw new Error(`clickImage(${x}, ${y}) would hit ${hit}, not the photo`)
   await page.mouse.click(p.x, p.y)
 }
 
 /**
  * Two clicks 200 image-px apart on the Scale step. The default reference is Custom 20 mm; pass
  * `{ preset: 'US Quarter' }` (or `{ mm: 24.26 }`) to measure against something else first. The second
- * click moves to the Threshold step, which detects on its own (see `detect`, `waitForAutoDetect`).
+ * click moves to the Area step and detects nothing: choose the area next (`useWholePhoto`, `drawArea`, or
+ * `setScaleAndArea` for both).
  */
 export async function setScale(page, { preset, mm } = {}) {
   await page.keyboard.press('2')
   if (preset) await page.locator('[data-testid=scale-preset]').selectOption(preset)
   if (mm != null) await page.locator('[data-testid=scale-mm]').fill(String(mm))
   await clickImage(page, 100, 40)
-  // The second click starts a detection by itself. On the cloud engine, listen for its /analyze response
-  // before clicking, so `detect` can't miss a reply that lands before it starts waiting.
-  if (isCloud(page)) {
-    const pending = page.waitForResponse(isAnalyzeResponse)
-    pending.catch(() => {}) // unused when a test never calls detect(); don't surface the page-close rejection
-    pendingCloudAnalyze.set(page, pending)
-  }
   await clickImage(page, 300, 40)
+}
+
+/**
+ * On the cloud engine, listen for the /analyze response before the click that starts the detection, so
+ * `detect` can't miss a reply that lands before it starts waiting.
+ */
+function armCloudAnalyze(page) {
+  if (!isCloud(page)) return
+  const pending = page.waitForResponse(isAnalyzeResponse)
+  pending.catch(() => {}) // unused when a test never calls detect(); don't surface the page-close rejection
+  pendingCloudAnalyze.set(page, pending)
+}
+
+/** The Area step's deliberate skip: "Use whole photo". Moves to Threshold, which detects on its own. */
+export async function useWholePhoto(page) {
+  armCloudAnalyze(page)
+  await page.getByTestId('whole-photo').click()
+}
+
+/** A small triangle on the grid (inside the first screenful). Image pixels. */
+export const DEFAULT_AREA = [[150, 150], [480, 150], [480, 330]]
+
+/**
+ * Draws a closed outline on the Area step (image pixels; default: a small triangle) and closes it by tapping
+ * the first point again. Moves to Threshold, which detects on its own.
+ */
+export async function drawArea(page, points = DEFAULT_AREA) {
+  for (const [x, y] of points) await clickImage(page, x, y)
+  armCloudAnalyze(page)
+  await clickImage(page, points[0][0], points[0][1])
+}
+
+/**
+ * Scale, then Area (`area: 'whole'` = Use whole photo, the default; or an array of image-pixel points to outline).
+ * The same photo area as before the Area step existed when `area` is 'whole'.
+ */
+export async function setScaleAndArea(page, { area = 'whole', ...scale } = {}) {
+  await setScale(page, scale)
+  if (area === 'whole') await useWholePhoto(page)
+  else await drawArea(page, area)
 }
 
 const pendingCloudAnalyze = new WeakMap()
@@ -128,6 +169,15 @@ export function isCloud(page) {
 /** Number of entries in the dev-only `window.__grindEngineLog` (see analyzerClient.js). */
 export function engineLogLength(page) {
   return page.evaluate(() => (window.__grindEngineLog || []).length)
+}
+
+/**
+ * How many times the app STARTED an engine call for `op` ('analyze' | 'thresholdPreview' | 'erase' | ...), from the
+ * dev-only `window.__grindEngineStarts`. The engine log only records completions, so this is what proves that a
+ * detection was never even attempted. Local engine and ?engine=cloud alike (it counts the app's calls).
+ */
+export function engineStarts(page, op) {
+  return page.evaluate((o) => (window.__grindEngineStarts || {})[o] ?? 0, op)
 }
 
 /**
@@ -150,7 +200,7 @@ export async function waitForEngineOp(page, op, fromIndex = 0, { ok = true, time
   return handle.jsonValue()
 }
 
-/** Waits for the detection that the Threshold step starts by itself and returns its engine log entry. */
+/** Waits for the detection that the Threshold step starts by itself once the area is chosen and returns its engine log entry. */
 export async function waitForAutoDetect(page, fromIndex = 0) {
   const entry = await waitForEngineOp(page, 'analyze', fromIndex)
   await expect(page.locator('.stat-hero-value')).toContainText(/\d/, { timeout: 60_000 })
@@ -167,13 +217,13 @@ export async function showResults(page) {
 }
 
 /**
- * Presses Enter to detect and waits for the results. After `setScale` a detection is already running
+ * Presses Enter to detect and waits for the results. After the area is chosen a detection is already running
  * (Enter is ignored while busy), so this resolves with that run; otherwise Enter starts a new one. Local engine: resolves with the engine log entry
  * ({nclusters, summary, ms}); cloud engine (?engine=cloud): with the /analyze response body.
  */
 export async function detect(page) {
   if (isCloud(page)) {
-    // Use the response `setScale` is already waiting for (the Threshold step's own detection); otherwise
+    // Use the response `useWholePhoto` / `drawArea` is already waiting for (the Threshold step's own detection); otherwise
     // press Enter to start one.
     let analyze = pendingCloudAnalyze.get(page)
     pendingCloudAnalyze.delete(page)

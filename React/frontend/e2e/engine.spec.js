@@ -2,7 +2,7 @@
 // with the Python core on the shared fixture photo. Run at desktop, tablet and phone widths.
 import { test, expect } from '@playwright/test'
 import {
-  openAnalyzer, uploadFixture, setScale, detect, clickImage, particleCount, trackErrors, GRID,
+  openAnalyzer, uploadFixture, setScaleAndArea, detect, clickImage, particleCount, trackErrors, GRID,
   engineLogLength, waitForEngineOp,
 } from './helpers.js'
 
@@ -13,7 +13,7 @@ const VIEWPORTS = [
 ]
 
 // Recorded from the Python core on fixtures/grind.png with the UI defaults (poly4 background, half-contrast
-// threshold, edge correction) and the scale set by setScale(page, { preset: 'US Quarter' }) (200 px = US quarter,
+// threshold, edge correction) and the scale set by setScaleAndArea(page, { preset: 'US Quarter' }) (200 px = US quarter,
 // 24.26 mm; the app's own default reference is Custom 20 mm). The legacy
 // settings give the same count (24). To regenerate:
 //   cd cloudrun && python - <<'PY'
@@ -37,13 +37,13 @@ for (const vp of VIEWPORTS) {
 
       await openAnalyzer(page)
       await uploadFixture(page)
-      await setScale(page)
+      await setScaleAndArea(page)
       const entry = await detect(page)
       expect(entry.nclusters).toBeGreaterThan(10)
       await expect(page.locator('.histogram-chart svg').first()).toBeVisible({ timeout: 15_000 })
 
       const before = await particleCount(page)
-      await page.keyboard.press('4')
+      await page.keyboard.press('5')
       await clickImage(page, GRID.xs[2], GRID.ys[1])
       const from = await engineLogLength(page)
       await page.keyboard.press('Enter')
@@ -72,7 +72,7 @@ for (const vp of VIEWPORTS) {
     test('progress is shown and Cancel stops detection; detecting again works', async ({ page }) => {
       await openAnalyzer(page, '?engineDelay=3000')
       await uploadFixture(page)
-      await setScale(page) // the second tap moves to Threshold, which starts detecting at once
+      await setScaleAndArea(page) // Use whole photo moves to Threshold, which starts detecting at once
 
       await expect(page.locator('.canvas-area[aria-busy="true"]')).toBeVisible()
       await expect(page.locator('.busy-progress')).toBeVisible()
@@ -97,7 +97,7 @@ for (const vp of VIEWPORTS) {
     test('the particle count and Dv50 match the Python core', async ({ page }) => {
       await openAnalyzer(page)
       await uploadFixture(page)
-      await setScale(page, { preset: 'US Quarter' })
+      await setScaleAndArea(page, { preset: 'US Quarter' })
       const entry = await detect(page)
       expect(entry.nclusters).toBe(PYTHON_NCLUSTERS)
       await expect.poll(() => particleCount(page)).toBe(PYTHON_NCLUSTERS)
