@@ -1,6 +1,6 @@
 import HistogramChart from './HistogramChart'
 import { um, sig, fixed, isNum, cleanUnit } from '../analyzerUtils'
-import { histogramKind, normalizeSummary } from '../analyzerCompat'
+import { histogramKind, normalizeShape, normalizeSplit, normalizeSummary } from '../analyzerCompat'
 
 const UNCAL = 'Uncalibrated model (Gagné heuristic), not a measurement'
 
@@ -16,6 +16,62 @@ function InfoIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true" className="note-icon">
       <circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 7.5v.5" />
     </svg>
+  )
+}
+
+function EllipseIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true" className="note-icon shape-icon">
+      <ellipse cx="12" cy="12" rx="9.5" ry="6" transform="rotate(-30 12 12)" />
+    </svg>
+  )
+}
+
+const SHAPE_TIP = 'Volume-weighted median length-to-width ratio of particles of at least 20 px. 1 : 1 is round.'
+
+const ratio = (v) => v.toFixed(2)
+
+/** "Shape 1.32 : 1  length to width · 80% between 1.08 and 1.75" (shorter on the phone sheet). */
+function ShapeLine({ shape, phone }) {
+  const hasRange = shape.arP10 != null && shape.arP90 != null
+  let rest = ''
+  if (phone) rest = hasRange ? ` · 80% ${ratio(shape.arP10)}–${ratio(shape.arP90)}` : ''
+  else rest = ` length to width${hasRange ? ` · 80% between ${ratio(shape.arP10)} and ${ratio(shape.arP90)}` : ''}`
+  return (
+    <p className="card-note shape-line" data-testid="shape-line" title={SHAPE_TIP}>
+      <EllipseIcon />
+      <span>
+        <span className="shape-label">Shape</span>{'\u00a0 '}
+        <span className="shape-value">{ratio(shape.arMedian)} : 1</span>
+        {rest}
+      </span>
+    </p>
+  )
+}
+
+/** Shown only when "Separate touching particles" was on for this analysis. */
+export function SplitNote({ split, phone, erased = false }) {
+  let text
+  if (split.clustersSplit > 0) {
+    const before = split.before?.dv90 != null ? split.before.dv90 : null
+    if (phone) {
+      text = (
+        <>
+          Separated {split.clustersSplit.toLocaleString()} clumps → {split.pieces.toLocaleString()} particles
+          {before != null && <> · <span className="nowrap">Dv90 before {um(before)} µm{erased ? ' at detection' : ''}</span></>}
+        </>
+      )
+    } else {
+      text = `Separated ${split.clustersSplit.toLocaleString()} touching clumps into ${split.pieces.toLocaleString()} particles.${before != null ? ` Dv90 before separating${erased ? ' (at detection, before clean-up)' : ''}: ${um(before)} µm.` : ''}`
+    }
+  } else {
+    text = 'Separate touching particles is on; no touching clumps were found.'
+  }
+  return (
+    <p className="card-note" data-testid="split-note">
+      <InfoIcon />
+      <span>{text}</span>
+    </p>
   )
 }
 
@@ -65,7 +121,7 @@ export function headlineOf(rawSummary) {
 
 /** The body of the glass results card (and of the phone sheet). */
 export default function ResultsPanel({
-  result, histogram, histogramLoading, weight = 'mass', expanded = false, onToggleExpand,
+  result, histogram, histogramLoading, weight = 'mass', expanded = false, onToggleExpand, phone = false, erased = false,
 }) {
   if (!result) return null
   const { nclusters, summary: rawSummary } = result
@@ -92,6 +148,14 @@ export default function ResultsPanel({
   const span = isNum(raw.span) ? raw.span : null
   const gm = raw.geometric_mean_volume_mm
   const scaleUnc = raw.diameter_scale_unc_pct
+  const shape = normalizeShape(result.shape_summary)
+  const split = normalizeSplit(result.split_info)
+  const shapeNotes = (shape || split) ? (
+    <>
+      {shape && <ShapeLine shape={shape} phone={phone} />}
+      {split && <SplitNote split={split} phone={phone} erased={erased} />}
+    </>
+  ) : null
 
   return (
     <div className="results-body">
@@ -131,6 +195,8 @@ export default function ResultsPanel({
         )}
       </div>
 
+      {!phone && shapeNotes}
+
       {!legacy && (
         <p className="card-note" data-testid="fines-note">
           <InfoIcon />
@@ -159,6 +225,8 @@ export default function ResultsPanel({
       {kind !== 'series' && rawSummary && !histogram && histogramLoading && (
         <div className="histogram-loading" role="status"><span className="spinner" />Loading size distribution…</div>
       )}
+
+      {phone && shapeNotes}
 
       <button
         type="button"
@@ -192,6 +260,17 @@ export default function ResultsPanel({
           )}
           {!legacy && isNum(scaleUnc) && (
             <Metric label="Scale uncertainty" value={`±${scaleUnc.toFixed(2)}%`} hint="From clicking the coin edges" />
+          )}
+          {shape && (
+            <Metric
+              label="Aspect ratio"
+              value={ratio(shape.arMedian)}
+              hint={shape.arP10 != null && shape.arP90 != null ? `10–90%: ${ratio(shape.arP10)}–${ratio(shape.arP90)}` : null}
+              title={SHAPE_TIP}
+            />
+          )}
+          {split && split.before?.dv90 != null && (
+            <Metric label="Dv90 unseparated" value={`${um(split.before.dv90)} µm`} hint={erased ? 'at detection, before clean-up' : 'at detection'} />
           )}
           <Metric label="Surface quality" value={fixed(raw.surface_quality, 2)} hint="Uncalibrated model" title={`${UNCAL}. Mean / std of surface; higher = more uniform.`} />
           <Metric label="Est. extraction" value={isNum(raw.average_extraction_yield_pct) ? `${raw.average_extraction_yield_pct.toFixed(1)}%` : null} hint="Uncalibrated model" title={UNCAL} />

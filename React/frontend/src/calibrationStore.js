@@ -84,6 +84,8 @@ function sanitizeRun(raw, { range = false } = {}) {
     coffee: typeof raw.coffee === 'string' && raw.coffee ? raw.coffee : null,
     createdAt: created,
     excluded: Boolean(raw.excluded),
+    // additive: only present on points saved while "Separate touching particles" was on
+    ...(raw.separated === true ? { separated: true } : {}),
     apiShape: raw.apiShape === 'legacy' || raw.apiShape === 'new'
       ? raw.apiShape
       : (dv50 !== null ? 'new' : 'legacy'),
@@ -170,6 +172,7 @@ export function runFromSummary(summary, { grindSetting, coffee = null, nclusters
     n_particles: count,
     coffee: coffee || null,
     apiShape: dv50 !== null ? 'new' : 'legacy',
+    ...(summary.split_touching === true ? { separated: true } : {}),
   }
 }
 

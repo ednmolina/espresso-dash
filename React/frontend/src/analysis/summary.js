@@ -296,7 +296,7 @@ export function summarizeDataset(ds, scale, opts = {}) {
     effective_cluster_count: npSum(edgeW),
     model_notes: [...MODEL_NOTES],
   }
-  for (const key of ['threshold_percent_used', 'background_model', 'threshold_mode', 'axis_method', 'volume_model']) {
+  for (const key of ['threshold_percent_used', 'background_model', 'threshold_mode', 'axis_method', 'volume_model', 'split_touching']) {
     if (key in meta) summary[key] = meta[key]
   }
   return finiteOrNull(summary)
@@ -314,6 +314,56 @@ export function summaryOrNone(ds) {
   return null
 }
 
+export const ASPECT_MIN_PX = 20
+export const ASPECT_MIN_COUNT = 10
+
+/**
+ * Aspect-ratio statistics of the measured moment ellipses (volume-weighted like Dv).
+ * Only particles of at least ASPECT_MIN_PX pixels qualify (digitisation inflates the aspect
+ * ratio of smaller ones). null when the dataset is empty; the three aspect values are null
+ * when fewer than ASPECT_MIN_COUNT particles qualify or the moment columns are NaN.
+ * Pure; never throws.
+ */
+export function shapeSummaryOrNone(ds) {
+  try {
+    if (!ds || ds.n === 0) return null
+    let scale = ds.pixel_scale
+    let f
+    if (typeof scale === 'number' && scale > 0) {
+      f = filterByMinDiameter(ds, scale, (ds.meta || {}).min_diameter_um)
+    } else {
+      f = ds
+      scale = 1
+    }
+    const ar = []
+    const w = []
+    for (let i = 0; i < f.n; i++) {
+      const a = f.aspect_ratio[i]
+      if (f.surface[i] >= ASPECT_MIN_PX && Number.isFinite(a)) {
+        const d = (2.0 * Math.sqrt(f.long_axis[i] * f.short_axis[i])) / scale
+        ar.push(a)
+        w.push(((Math.PI / 6.0) * Math.pow(d, 3)) * f.edge_weight[i])
+      }
+    }
+    const kept = ar.length
+    let p10 = null
+    let p50 = null
+    let p90 = null
+    if (kept >= ASPECT_MIN_COUNT) {
+      ;[p10, p50, p90] = weightedPercentiles(Float64Array.from(ar), Float64Array.from(w), [10, 50, 90])
+    }
+    return finiteOrNull({
+      aspect_ratio_median: p50,
+      aspect_ratio_p10: p10,
+      aspect_ratio_p90: p90,
+      aspect_ratio_n: kept,
+      min_px: ASPECT_MIN_PX,
+    })
+  } catch (err) {
+    return null
+  }
+}
+
 /** main._particles_payload: plain arrays, floats rounded to 6 significant digits. */
 export function particlesPayload(ds) {
   return {
@@ -323,5 +373,8 @@ export function particlesPayload(ds) {
     short_axis: sig6(ds.short_axis),
     long_axis: sig6(ds.long_axis),
     volume: sig6(ds.volume),
+    major_axis_measured: sig6(ds.major_axis_measured),
+    minor_axis_measured: sig6(ds.minor_axis_measured),
+    aspect_ratio: sig6(ds.aspect_ratio),
   }
 }

@@ -118,6 +118,7 @@ export function buildCalibrationPoints(shots, runs, { excludedShotIds = [] } = {
       date: run.createdAt ? String(run.createdAt).slice(0, 10) : null,
       coffee: run.coffee ?? null,
       excluded: Boolean(run.excluded),
+      ...(run.separated === true ? { separated: true } : {}),
     }
     if (isFiniteNum(run.mean_um) && run.mean_um > 0) {
       points.push({ ...base, id: `run:${run.id}:mean`, um: run.mean_um, metric: 'mean' })

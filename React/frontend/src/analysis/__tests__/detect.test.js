@@ -43,7 +43,7 @@ describe('settings', () => {
   it('validates the enums with the Python messages (status 400)', () => {
     for (const [name, allowed] of [
       ['background_model', 'global, poly4'], ['threshold_mode', 'fixed, half_contrast'],
-      ['axis_method', 'max_radius, moments'], ['volume_model', 'legacy, spheroid'],
+      ['axis_method', 'max_radius, moments'], ['volume_model', 'legacy, spheroid, ellipsoid'],
     ]) {
       let err
       try { makeSettings({ [name]: 'nope' }) } catch (e) { err = e }

@@ -298,6 +298,11 @@
 }
 
 .analyzer-sidebar label.checkbox .label-row { grid-column: auto; }
+.analyzer-sidebar label.checkbox.split-toggle { align-items: flex-start; min-height: 44px; }
+.analyzer-sidebar label.checkbox.split-toggle input { margin-top: 2px; }
+.analyzer-sidebar label.checkbox.split-toggle .split-text { display: flex; flex-direction: column; min-width: 0; }
+.analyzer-sidebar label.checkbox.split-toggle .label-row { align-items: center; }
+.analyzer-sidebar .field-hint { display: block; margin-top: 2px; font-size: 12px; font-weight: 400; color: var(--el-text-2); }
 
 .analyzer-sidebar input[type=range] {
   --fill: 0%;
@@ -1040,6 +1045,13 @@
 }
 
 .card-note .note-icon { flex: none; margin-top: 1px; }
+
+/* Shape line + separation note (results card and phone sheet) */
+.card-note .note-icon.shape-icon { margin-top: 2px; }
+.shape-label { font-weight: 600; color: rgba(255, 255, 255, 0.78); }
+.shape-value { font-size: 15px; font-weight: 600; color: #fff; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.shape-line + .card-note { margin-top: -4px; }
+.card-note .nowrap { white-space: nowrap; }
 
 .card-chart { margin: 2px 0; }
 

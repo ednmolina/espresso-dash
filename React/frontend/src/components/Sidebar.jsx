@@ -76,7 +76,7 @@ function HelpTip({ text, label }) {
  * Analyzer settings. Rendered inside a popover (desktop/tablet) or a Sheet (phone);
  * `onClose` adds a Done button, `showTitle={false}` drops the heading when the host supplies one.
  */
-export default function Sidebar({ settings, onSettingsChange, referencePreset, onPresetChange, referencePhysicalMm, onPhysicalMmChange, onClose, showTitle = true }) {
+export default function Sidebar({ settings, onSettingsChange, referencePreset, onPresetChange, referencePhysicalMm, onPhysicalMmChange, onClose, showTitle = true, isLocal = true }) {
   const set = (key) => (e) => {
     const val = e.target.type === 'checkbox' ? e.target.checked : parseFloat(e.target.value)
     onSettingsChange({ ...settings, [key]: val })
@@ -178,8 +178,30 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
           <span>Quick mode (skip breakup)</span>
           <HelpTip
             label="Quick clustering"
-            text="Skips the pass that splits touching particles. Faster, but clumps are counted as one large particle."
+            text="Skips the brightness-based pass that trims faint bridges between particles. Faster, but clumps are more likely to be counted as one large particle. Separate touching particles works either way."
           />
+        </span>
+      </label>
+
+      <label className="checkbox split-toggle">
+        <input
+          type="checkbox"
+          data-testid="split-toggle"
+          checked={!!settings.split_touching && isLocal}
+          disabled={!isLocal}
+          onChange={set('split_touching')}
+        />
+        <span className="split-text">
+          <span className="label-row">
+            <span>Separate touching particles</span>
+            <HelpTip
+              label="Separate touching particles"
+              text="Cuts clumps where particles only touch at a narrow neck, so each one is measured on its own. Use it when grounds clump; it lowers Dv90. Adds roughly 5–15% to analysis time. Leave off to keep results comparable with earlier runs and your grinder curve."
+            />
+          </span>
+          <span className="field-hint" data-testid={isLocal ? undefined : 'split-cloud-hint'}>
+            {isLocal ? 'Splits clumps at narrow necks · a little slower' : 'On-device analysis only'}
+          </span>
         </span>
       </label>
 
@@ -244,7 +266,7 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
           <label>
             <span className="label-row">
               <span>Axis method</span>
-              <HelpTip label="Axis method" text="How particle axes are measured. Max radius is the original method; moments is based on the shape's second moments." />
+              <HelpTip label="Axis method" text="How the long axis is measured. Max radius is the original method; Moments fits an ellipse to the particle. Either way, the length-to-width ratio is always measured with the ellipse fit." />
             </span>
             <select value={settings.axis_method} onChange={setStr('axis_method')}>
               <option value="max_radius">Max radius</option>
@@ -255,11 +277,12 @@ export default function Sidebar({ settings, onSettingsChange, referencePreset, o
           <label>
             <span className="label-row">
               <span>Volume model</span>
-              <HelpTip label="Volume model" text="Shape assumption used to turn area into volume for the volume-weighted statistics." />
+              <HelpTip label="Volume model" text="Shape assumed when turning a particle's area into a volume. Used for extraction and efficiency estimates and the volume histogram; Dv10/50/90 don't change. Legacy: cylinder. Spheroid: rotated about the long axis. Ellipsoid (measured): length and width measured from the outline, thickness assumed equal to the width." />
             </span>
             <select value={settings.volume_model} onChange={setStr('volume_model')}>
               <option value="legacy">Legacy</option>
               <option value="spheroid">Spheroid</option>
+              <option value="ellipsoid" disabled={!isLocal}>Ellipsoid (measured){!isLocal ? ' · on-device only' : ''}</option>
             </select>
           </label>
 

@@ -5,16 +5,17 @@ import ResultsPanel, { DistributionPanel, headlineOf } from './ResultsPanel'
 import HistogramChart, { SERIES_COLORS } from './HistogramChart'
 import GrindSettingPicker from './pages/GrindSettingPicker'
 import { Sheet, useBreakpoint } from './shell'
-import { DEFAULT_SETTINGS, REFERENCE_OBJECTS, settingsPayload } from '../constants'
+import { DEFAULT_SETTINGS, REFERENCE_OBJECTS, analysisSettingsPayload } from '../constants'
 import { createAnalyzerClient, disposeLocalEngine } from '../analysis/analyzerClient'
 import {
   particlesToCsv,
   isNum, um, cleanUnit, formatSigma, sig,
 } from '../analyzerUtils'
-import { histogramKind, layerOf, mergeErase, normalizeSummary, previewSrc } from '../analyzerCompat'
+import { histogramKind, layerOf, mergeErase, normalizeSummary, previewSrc, savedRunLabel } from '../analyzerCompat'
 import { useShots } from '../shotsStore'
 import { useGrindCalibration } from '../useModels'
 import { addRun, runFromSummary } from '../calibrationStore'
+import { clearLatestAnalysis, markLatestAnalysisErased, setLatestAnalysis } from '../analysisSession'
 import { parseSetting } from '../grindCalibration'
 import { useNav } from '../navigation'
 import '../analyzer.css'
@@ -130,9 +131,13 @@ const PHASE_RANGE = {
   flatten: [0.1, 0.2],
   prelim: [0.2, 0.4],
   detect: [0.4, 0.85],
-  measure: [0.85, 0.93],
+  split: [0.85, 0.89], // only reported when "Separate touching particles" is on
+  measure: [0.89, 0.93],
   layers: [0.93, 1],
 }
+
+const DETECT_LABEL = 'Detecting particles…'
+const SPLIT_LABEL = 'Separating touching particles…'
 
 const isImageLayer = (l) => l != null && typeof l === 'object' && typeof l.close === 'function'
 
@@ -229,6 +234,9 @@ export default function AnalyzerApp({ user }) {
     const [lo, hi] = phaseRanges.current[phase] ?? [0, 1]
     const v = lo + (hi - lo) * Math.max(0, Math.min(1, fraction ?? 0))
     setProgress((prev) => Math.max(prev, v))
+    // the split pass has its own busy label; the next phase puts the detect label back
+    if (phase === 'split') setBusyLabel(SPLIT_LABEL)
+    else setBusyLabel((l) => (l === SPLIT_LABEL ? DETECT_LABEL : l))
   }), [client])
 
   // Leaving the analyzer frees the worker, the decoded photo and the stored results.
@@ -283,6 +291,9 @@ export default function AnalyzerApp({ user }) {
     const id = setInterval(() => setElapsed((performance.now() - t0) / 1000), 100)
     return () => clearInterval(id)
   }, [busy])
+
+  // 'Detecting…' covers both detect labels (the split pass swaps the label while it runs)
+  const detecting = busyLabel.startsWith('Detecting') || busyLabel === SPLIT_LABEL
 
   const startBusy = (label) => {
     // Detecting may first re-decode the photo (after a cancel), so decode only fills the
@@ -368,6 +379,7 @@ export default function AnalyzerApp({ user }) {
       setPolygonPoints([])
       setErasePoints([])
       setAnalysisResult(null)
+      clearLatestAnalysis()
       setRemovedIds([])
       setHistogram(null)
       setHistogramLoading(false)
@@ -465,15 +477,18 @@ export default function AnalyzerApp({ user }) {
   const runAnalysis = useCallback(async () => {
     if (!imageId || busy) return
     if (!canDetect) { say('Set the scale first: click both edges of the coin.', 'error'); return }
-    startBusy('Detecting particles…')
-    say('Detecting particles…')
+    startBusy(DETECT_LABEL)
+    say(DETECT_LABEL)
     const started = performance.now()
+
+    // the old Cloud Run server rejects the new options, so they are not sent with ?engine=cloud
+    const { body: settingsBody, stripped } = analysisSettingsPayload(settings, { isLocal })
 
     try {
       const data = await client.request('/analyze', {
         json: {
           image_id: imageId,
-          ...settingsPayload(settings),
+          ...settingsBody,
           reference_points: referencePoints.map((point) => [point.x, point.y]),
           reference_physical_mm: referencePhysicalMm,
           polygon_points: polygonPoints.map((point) => [point.x, point.y]),
@@ -488,7 +503,12 @@ export default function AnalyzerApp({ user }) {
       setMode('erase')
       setDownloadsOpen(false)
       const secs = ((performance.now() - started) / 1000).toFixed(1)
-      say(`${(data.nclusters ?? 0).toLocaleString()} particles detected in ${secs}s. Click stray clusters to remove them.`, 'success')
+      setLatestAnalysis({ summary: data.summary ?? null, shape_summary: data.shape_summary ?? null, split_info: data.split_info ?? null })
+      say(
+        `${(data.nclusters ?? 0).toLocaleString()} particles detected in ${secs}s. Click stray clusters to remove them.`
+          + (stripped.length ? ` ${stripped.join(' and ')} need on-device analysis, so ${stripped.length === 1 ? 'it was' : 'they were'} skipped.` : ''),
+        'success',
+      )
       if (data.summary) loadHistogram([], histWeight)
     } catch (err) {
       if (wasCancelled(err)) sayCancelled('Detection cancelled.')
@@ -496,7 +516,7 @@ export default function AnalyzerApp({ user }) {
     } finally {
       setBusy(false)
     }
-  }, [imageId, busy, canDetect, settings, referencePoints, referencePhysicalMm, polygonPoints, client, loadHistogram, histWeight])
+  }, [imageId, busy, canDetect, settings, referencePoints, referencePhysicalMm, polygonPoints, client, isLocal, loadHistogram, histWeight])
 
   const applyErase = useCallback(async () => {
     if (!imageId || !erasePoints.length) return
@@ -519,6 +539,7 @@ export default function AnalyzerApp({ user }) {
       setErasePoints([])
       setHistogram(null)
       const added = gone.length - removedIds.length
+      if (gone.length > 0) markLatestAnalysisErased()
       say(added > 0 ? `${added} cluster${added === 1 ? '' : 's'} removed (${gone.length} in total).` : 'No clusters under the brush.', added > 0 ? 'success' : 'info')
       if ((data.summary ?? analysisResult?.summary)) loadHistogram(gone, histWeight)
     } catch (err) {
@@ -945,7 +966,7 @@ export default function AnalyzerApp({ user }) {
             <tbody>
               {savedRuns.map((run, i) => (
                 <tr key={run.label}>
-                  <td><i className="run-swatch" style={{ background: SERIES_COLORS[i] }} />{run.label}</td>
+                  <td><i className="run-swatch" style={{ background: SERIES_COLORS[i] }} />{savedRunLabel(run)}</td>
                   <td>{isNum(run.summary?.cluster_count) ? run.summary.cluster_count.toLocaleString() : '—'}</td>
                   <td>{um(run.summary?.dv50_mm)}</td>
                   <td>
@@ -992,6 +1013,8 @@ export default function AnalyzerApp({ user }) {
       histogramLoading={histogramLoading}
       weight={histWeight}
       expanded={histExpanded}
+      phone={isPhone}
+      erased={removedIds.length > 0}
       onToggleExpand={() => {
         if (isPhone && !histExpanded) setSheetDetent('full')
         setHistExpanded((v) => !v)
@@ -1009,7 +1032,7 @@ export default function AnalyzerApp({ user }) {
           <li><span aria-hidden="true">☐</span> Detect</li>
         </ul>
         <button type="button" className="btn-primary btn-large" onClick={runAnalysis} disabled={detectDisabled} title={detectTitle}>
-          {busy && busyLabel.startsWith('Detecting') ? 'Running…' : 'Run particle detection'}
+          {busy && detecting ? 'Running…' : 'Run particle detection'}
         </button>
       </div>
     </aside>
@@ -1114,6 +1137,7 @@ export default function AnalyzerApp({ user }) {
     <Sidebar
       settings={settings}
       onSettingsChange={setSettings}
+      isLocal={isLocal}
       referencePreset={referencePreset}
       onPresetChange={handlePresetChange}
       referencePhysicalMm={referencePhysicalMm}
@@ -1207,7 +1231,7 @@ export default function AnalyzerApp({ user }) {
                   >
                     <span className="step-n" aria-hidden="true">{isDone ? '✓' : step.n}</span>
                     <span className="step-label">{step.label}</span>
-                    {step.id === 'detect' && busy && busyLabel.startsWith('Detecting') && <span className="spinner" aria-hidden="true" />}
+                    {step.id === 'detect' && busy && detecting && <span className="spinner" aria-hidden="true" />}
                   </button>
                 </li>
               )
@@ -1279,7 +1303,7 @@ export default function AnalyzerApp({ user }) {
             disabled={detectDisabled}
             title={detectTitle}
           >
-            {busy && busyLabel.startsWith('Detecting') ? 'Detecting…' : runLabel}
+            {busy && detecting ? 'Detecting…' : runLabel}
           </button>
         </div>
       )}

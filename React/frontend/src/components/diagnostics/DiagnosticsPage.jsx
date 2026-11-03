@@ -3,6 +3,9 @@ import { dataCoverage, LIMITS } from '../../forecastModel'
 import { indexToSetting } from '../../grindCalibration'
 import { useNav } from '../../navigation'
 import { useShots } from '../../shotsStore'
+import { useLatestAnalysis } from '../../analysisSession'
+import { checksSubtitle, photoChecksModel } from '../../photoChecks'
+import { um as fmtUm } from '../../analyzerUtils'
 import { useForecastModel, useGrindCalibration } from '../../useModels'
 import { formatShortDate } from '../dashboard/chartUtils'
 import {
@@ -66,6 +69,100 @@ function CoverageRow({ label, value, total, extra = 0, detail }) {
   )
 }
 
+/* ------------------------- photo analysis checks ------------------------- */
+
+const SHAPE_AXIS_MIN = 1
+const SHAPE_AXIS_MAX = 3
+const shapePct = (v) => `${Math.max(0, Math.min(100, ((v - SHAPE_AXIS_MIN) / (SHAPE_AXIS_MAX - SHAPE_AXIS_MIN)) * 100))}%`
+
+const countText = (v) => (finite(v) ? Math.round(v).toLocaleString() : '—')
+const umText = (mm) => (finite(mm) ? `${fmtUm(mm)} µm` : '—')
+
+function ShapeRange({ shape }) {
+  const hasBand = shape.arP10 != null && shape.arP90 != null
+  const lo = hasBand ? Math.max(SHAPE_AXIS_MIN, shape.arP10) : null
+  const hi = hasBand ? Math.min(SHAPE_AXIS_MAX, shape.arP90) : null
+  const label = `Length-to-width ratio from ${SHAPE_AXIS_MIN.toFixed(1)} (round) to ${SHAPE_AXIS_MAX.toFixed(1)} (elongated): median ${shape.arMedian.toFixed(2)}${hasBand ? `, 80% between ${shape.arP10.toFixed(2)} and ${shape.arP90.toFixed(2)}` : ''}`
+  return (
+    <div className="el-range-wrap">
+      <div className="el-range" role="img" aria-label={label} data-testid="diag-shape-range">
+        {hasBand ? <i className="el-range-band" style={{ left: shapePct(lo), width: `${parseFloat(shapePct(hi)) - parseFloat(shapePct(lo))}%` }} /> : null}
+        <i className="el-range-tick" style={{ left: shapePct(shape.arMedian) }} />
+        <b className="el-range-med" style={{ left: shapePct(shape.arMedian) }}>{shape.arMedian.toFixed(2)}</b>
+      </div>
+      <div className="el-range-axis" aria-hidden="true"><span>round 1.0</span><span>3.0 elongated</span></div>
+    </div>
+  )
+}
+
+function ChecksShape({ model, phone }) {
+  const { shape } = model
+  return (
+    <div className="el-pcheck" data-testid="diag-shape">
+      <h3 className="el-pcheck-title">Particle shape</h3>
+      {shape ? (
+        <>
+          <p className="el-pcheck-text">
+            Typically <b>{shape.arMedian.toFixed(2)} : 1</b> (length to width)
+            {shape.arP10 != null && shape.arP90 != null ? `; 80% of the volume is between ${shape.arP10.toFixed(2)} and ${shape.arP90.toFixed(2)}` : ''}.
+          </p>
+          <ShapeRange shape={shape} />
+          {shape.n != null ? <p className={`el-pcheck-foot muted${phone ? '' : ' is-spaced'}`}>From {shape.n.toLocaleString()} particles of at least {model.minPx} px.</p> : null}
+        </>
+      ) : (
+        <p className="el-pcheck-text muted">Not enough particles of at least {model.minPx} px to measure their shape in this photo.</p>
+      )}
+    </div>
+  )
+}
+
+function ChecksSplit({ model, phone, onOpenAnalyzer }) {
+  const { table } = model
+  if (!table) {
+    return (
+      <div className="el-pcheck" data-testid="diag-split-off">
+        <h3 className="el-pcheck-title">Touching particles</h3>
+        <p className="el-pcheck-text">
+          Turn on <b>Separate touching particles</b> in the Analyzer settings and detect again to compare Dv90 with and without it.
+        </p>
+        <button type="button" className="el-link-btn" onClick={onOpenAnalyzer} data-testid="diag-open-analyzer">Open Analyzer</button>
+      </div>
+    )
+  }
+  const change = table.change
+  const dv90After = change ? (
+    <span className={`el-pcheck-change${change.lower ? ' is-good' : ''}`}>{change.text}</span>
+  ) : null
+  return (
+    <div className="el-pcheck" data-testid="diag-split-on">
+      <h3 className="el-pcheck-title">Touching particles</h3>
+      {phone ? (
+        <>
+          <p className="el-pcheck-sub muted">Not separated → separated</p>
+          <div className="el-pcheck-rows" data-testid="diag-split-table">
+            <div className="el-pcheck-row"><span>Particles</span><span>{countText(table.particles[0])} → {countText(table.particles[1])}</span></div>
+            <div className="el-pcheck-row"><span>Dv50</span><span>{umText(table.dv50[0])} → {umText(table.dv50[1])}</span></div>
+            <div className="el-pcheck-row"><span>Dv90</span><span>{fmtUmOnly(table.dv90[0])} → {umText(table.dv90[1])} {dv90After}</span></div>
+          </div>
+        </>
+      ) : (
+        <table className="el-pcheck-table" data-testid="diag-split-table">
+          <thead><tr><th scope="col"><span className="el-sr-only">Measure</span></th><th scope="col" className="num">Not separated</th><th scope="col" className="num">Separated</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Particles</th><td className="num">{countText(table.particles[0])}</td><td className="num">{countText(table.particles[1])}</td></tr>
+            <tr><th scope="row">Dv50</th><td className="num">{umText(table.dv50[0])}</td><td className="num">{umText(table.dv50[1])}</td></tr>
+            <tr><th scope="row">Dv90</th><td className="num">{umText(table.dv90[0])}</td><td className="num">{umText(table.dv90[1])} {dv90After}</td></tr>
+          </tbody>
+        </table>
+      )}
+      <p className="el-pcheck-foot muted">Separation lowers Dv90 when clumps are counted as one large particle. Points saved to the grinder curve while it is on are marked.{model.erased ? ' Figures are from detection, before clean-up.' : ''}</p>
+    </div>
+  )
+}
+
+/** "823" without the unit, for the phone's "823 → 792 µm" form. */
+const fmtUmOnly = (mm) => (finite(mm) ? fmtUm(mm) : '—')
+
 /* ------------------------------ page ------------------------------ */
 
 export default function DiagnosticsPage() {
@@ -78,6 +175,9 @@ export default function DiagnosticsPage() {
   const [infoOpen, setInfoOpen] = useState(false)
   const [sheet, setSheet] = useState(null)
   const [showDates, setShowDates] = useState(false)
+  const latest = useLatestAnalysis()
+  const checks = useMemo(() => photoChecksModel(latest), [latest])
+  const openAnalyzer = () => { setSheet(null); go('analyzer') }
 
   const bt = model?.backtest ?? null
   const withExtraction = coverage.withExtraction ?? model?.n ?? 0
@@ -312,6 +412,7 @@ export default function DiagnosticsPage() {
       { id: 'inputs', title: 'Which inputs matter', sub: ranked[0] ? `${ranked[0].label} matters most` : 'No tested inputs yet', body: importanceBody, testId: 'diag-importance' },
       { id: 'coverage', title: 'Data coverage', sub: coverage.ph52.count ? `${coverage.ph52.count} shots may have a default pH` : `pH on ${coverage.ph.count} of ${total} shots`, body: coverageBody, testId: 'diag-coverage' },
       { id: 'fit', title: 'Grinder calibration fit', sub: `${fitModel?.n ?? 0} points · ${fitScatter} scatter`, body: fitBody, testId: 'diag-grinder-fit' },
+      { id: 'checks', title: 'Photo analysis checks', sub: checksSubtitle(checks), body: null, testId: 'diag-photo-checks', plain: true },
     ]
     const open = rows.find((r) => r.id === sheet)
     return (
@@ -340,7 +441,17 @@ export default function DiagnosticsPage() {
           initialDetent="large"
           testId="diag-sheet"
         >
-          {open ? <div className="el-card el-in-sheet" data-testid={open.testId}>{open.body}</div> : null}
+          {open && open.id === 'checks' ? (
+            <div className="el-checks-sheet" data-testid={open.testId}>
+              <p className="muted el-checks-lead">From your latest analysis on this device. Not saved.</p>
+              {checks ? (
+                <>
+                  <div className="el-card"><ChecksShape model={checks} phone /></div>
+                  <div className="el-card"><ChecksSplit model={checks} phone onOpenAnalyzer={openAnalyzer} /></div>
+                </>
+              ) : <div className="el-card"><p className="el-pcheck-text">Analyze a photo to see these checks.</p></div>}
+            </div>
+          ) : open ? <div className="el-card el-in-sheet" data-testid={open.testId}>{open.body}</div> : null}
         </Sheet>
         <Sheet
           open={sheet === 'info'}
@@ -386,6 +497,16 @@ export default function DiagnosticsPage() {
         <section className="el-card" data-testid="diag-coverage"><h2>Data coverage</h2><p className="muted el-card-lead">What the forecast has to work with.</p>{coverageBody}</section>
         <section className="el-card" data-testid="diag-grinder-fit"><h2>Grinder calibration fit</h2><p className="muted el-card-lead">How closely the setting-to-size curve matches your points.</p>{fitBody}</section>
       </div>
+      <section className="el-card el-checks" data-testid="diag-photo-checks">
+        <h2>Photo analysis checks</h2>
+        <p className="muted el-card-lead">From your latest analysis on this device. Not saved.</p>
+        {checks ? (
+          <div className="el-checks-cols">
+            <ChecksShape model={checks} />
+            <ChecksSplit model={checks} onOpenAnalyzer={openAnalyzer} />
+          </div>
+        ) : <p className="el-pcheck-text" data-testid="diag-checks-empty">Analyze a photo to see these checks.</p>}
+      </section>
     </div>
   )
 }

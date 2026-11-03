@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { layerOf, mergeErase, previewSrc, normalizeSummary, histogramKind } from '../analyzerCompat'
+import { layerOf, mergeErase, previewSrc, normalizeSummary, normalizeShape, histogramKind } from '../analyzerCompat'
 
 describe('layerOf', () => {
   it('returns null without a result or for the original photo', () => {
@@ -57,6 +57,32 @@ describe('mergeErase', () => {
   it('uses the old opaque composite as a last resort', () => {
     const merged = mergeErase({}, { cluster_overlay_b64: 'old' }, [])
     expect(merged.cluster_layer_b64).toBe('old')
+  })
+})
+
+describe('mergeErase shape_summary', () => {
+  const shape = { aspect_ratio_median: 1.4, aspect_ratio_n: 12 }
+  it('keeps the previous shape_summary when the response has none', () => {
+    expect(mergeErase({ shape_summary: shape }, { nclusters: 3 }, []).shape_summary).toBe(shape)
+  })
+  it('replaces it, including with null', () => {
+    const next = { aspect_ratio_median: 1.3, aspect_ratio_n: 10 }
+    expect(mergeErase({ shape_summary: shape }, { shape_summary: next }, []).shape_summary).toBe(next)
+    expect(mergeErase({ shape_summary: shape }, { shape_summary: null }, []).shape_summary).toBeNull()
+  })
+})
+
+describe('normalizeShape', () => {
+  it('returns null without a usable median', () => {
+    expect(normalizeShape(null)).toBeNull()
+    expect(normalizeShape(undefined)).toBeNull()
+    expect(normalizeShape({ aspect_ratio_median: null, aspect_ratio_n: 4 })).toBeNull()
+    expect(normalizeShape({ aspect_ratio_median: 'x' })).toBeNull()
+  })
+  it('maps the numbers and nulls the missing ones', () => {
+    expect(normalizeShape({ aspect_ratio_median: 1.4, aspect_ratio_p10: 1.1, aspect_ratio_p90: 2, aspect_ratio_n: 30, min_px: 20 }))
+      .toEqual({ arMedian: 1.4, arP10: 1.1, arP90: 2, n: 30 })
+    expect(normalizeShape({ aspect_ratio_median: 1.4 })).toEqual({ arMedian: 1.4, arP10: null, arP90: null, n: null })
   })
 })
 

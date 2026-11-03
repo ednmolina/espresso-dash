@@ -43,6 +43,7 @@ export function mergeErase(prev, data, removedIds) {
     cluster_layer_b64: next.cluster_layer_b64 ?? next.cluster_overlay_b64 ?? base.cluster_layer_b64 ?? base.cluster_overlay_b64 ?? null,
     nclusters: next.nclusters ?? base.nclusters,
     summary: next.summary !== undefined ? next.summary : base.summary,
+    shape_summary: next.shape_summary !== undefined ? next.shape_summary : base.shape_summary,
     particles,
   }
 }
@@ -104,6 +105,45 @@ export function normalizeSummary(summary) {
     limitUm: num(s.detection_limit_um),
     raw: summary ?? null,
   }
+}
+
+/**
+ * Normalised view of the analyze/erase `shape_summary` (aspect-ratio statistics of the
+ * measured ellipses). null when absent or without a median.
+ */
+export function normalizeShape(s) {
+  if (!s || !isNum(s.aspect_ratio_median)) return null
+  const num = (v) => (isNum(v) ? v : null)
+  return {
+    arMedian: s.aspect_ratio_median,
+    arP10: num(s.aspect_ratio_p10),
+    arP90: num(s.aspect_ratio_p90),
+    n: num(s.aspect_ratio_n),
+  }
+}
+
+/**
+ * Normalised view of the analyze `split_info` (present only when "Separate touching particles"
+ * was on). `pieces` is the number of particles the split clumps became; `before` is what the same
+ * photo reports without separation (null without a pixel scale). Values are analysis-time:
+ * a clean-up afterwards does not change them.
+ */
+export function normalizeSplit(info) {
+  if (!info || typeof info !== 'object') return null
+  const clustersSplit = isNum(info.clusters_split) ? info.clusters_split : 0
+  const added = isNum(info.pieces_added) ? info.pieces_added : 0
+  const u = info.unsplit && typeof info.unsplit === 'object' ? info.unsplit : null
+  const num = (v) => (isNum(v) ? v : null)
+  return {
+    clustersSplit,
+    pieces: clustersSplit + added,
+    before: u ? { count: num(u.cluster_count), dv10: num(u.dv10_mm), dv50: num(u.dv50_mm), dv90: num(u.dv90_mm) } : null,
+  }
+}
+
+/** Saved-run label as shown in the runs table: " · separated" when the run used separation. */
+export function savedRunLabel(run) {
+  return run?.summary?.split_touching === true ? `${run.label} · separated` : String(run?.label ?? '')
 }
 
 /** 'series' when the browser can draw the chart, 'png' for the old server-rendered image, else 'none'. */

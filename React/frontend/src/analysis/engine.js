@@ -7,7 +7,7 @@
 
 import { makeSettings, analyzeImageBlue, clustersWithinRadius, thresholdIndexLayer, clusterIndexLayer } from './detect.js'
 import { filterDatasetByClusterIds, dropPixels } from './dataset.js'
-import { summaryOrNone, particlesPayload } from './summary.js'
+import { summaryOrNone, particlesPayload, shapeSummaryOrNone } from './summary.js'
 import { histogramFromStored, compareFromStored } from './histogram.js'
 import { resizeLanczosU8 } from './resample.js'
 import { roundHalfEven, finiteOrNull } from './np.js'
@@ -97,7 +97,9 @@ function validateAnalyze(body) {
   checkEnum(body, 'threshold_mode', ['fixed', 'half_contrast'])
   checkBool(body, 'edge_correction')
   checkEnum(body, 'axis_method', ['max_radius', 'moments'])
-  checkEnum(body, 'volume_model', ['legacy', 'spheroid'])
+  checkEnum(body, 'volume_model', ['legacy', 'spheroid', 'ellipsoid'])
+  checkBool(body, 'split_touching')
+  checkNumber(body, 'split_neck_ratio', { min: 0.3, max: 0.95 })
   checkNumber(body, 'min_diameter_um', { min: 0, max: 100000 })
   checkNumber(body, 'click_sigma_px', { min: 0, max: 100 })
 }
@@ -294,7 +296,7 @@ export function createEngine() {
       analysis_polygon: polygon,
       pixel_scale: pixelScale,
     }
-    for (const name of ['background_model', 'threshold_mode', 'edge_correction', 'axis_method', 'volume_model', 'min_diameter_um', 'click_sigma_px']) {
+    for (const name of ['background_model', 'threshold_mode', 'edge_correction', 'axis_method', 'volume_model', 'min_diameter_um', 'click_sigma_px', 'split_touching', 'split_neck_ratio']) {
       if (body[name] !== undefined && body[name] !== null) overrides[name] = body[name]
     }
     if (pxLength !== null) overrides.reference_px_length = pxLength * s
@@ -340,6 +342,8 @@ export function createEngine() {
       nclusters: dataset.n,
       pixel_scale: dataset.pixel_scale,
       summary: summaryOrNone(dataset),
+      shape_summary: shapeSummaryOrNone(dataset),
+      ...(result.split_info ? { split_info: result.split_info } : {}),
       particles: particlesPayload(dataset),
       analysis_scale: s,
       analysis_id: analysisId,
@@ -383,6 +387,7 @@ export function createEngine() {
       nclusters: filtered.n,
       cluster_layer: layer,
       summary: finiteOrNull(summary),
+      shape_summary: finiteOrNull(shapeSummaryOrNone(filtered)),
     }
   }
 

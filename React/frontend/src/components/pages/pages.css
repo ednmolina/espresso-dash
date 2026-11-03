@@ -276,6 +276,8 @@ label.el-btn-tinted:hover { background: var(--el-separator); }
 .el-point-mark.is-ex { border: 1.5px dashed var(--el-text-2); }
 .el-point-main { flex: 1; min-width: 0; }
 .el-point-top { display: flex; justify-content: space-between; gap: 8px; font-variant-numeric: tabular-nums; }
+.el-point-top > .muted { flex: none; white-space: nowrap; }
+.el-point-top .el-chip-tag { margin-left: 6px; }
 .el-point-sub { font-size: 12px; color: var(--el-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .el-kv { display: flex; justify-content: space-between; gap: 12px; padding: 12px 14px; background: var(--el-surface); }
@@ -345,6 +347,43 @@ label.el-btn-tinted:hover { background: var(--el-separator); }
 .el-fit-stats span { display: block; font-size: 12px; color: var(--el-text-2); }
 .el-fit-stats b { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 
+/* ---- Photo analysis checks (Diagnostics) ---------------------------------------------- */
+
+.el-checks h2 + .el-card-lead { margin-bottom: 18px; }
+.el-checks-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; align-items: start; }
+.el-pcheck { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.el-pcheck-title { font-size: 15px; font-weight: 600; }
+.el-pcheck-text { font-size: 15px; line-height: 1.45; }
+.el-pcheck-foot { font-size: 14px; line-height: 1.45; }
+.el-pcheck-foot.is-spaced { margin-top: 6px; }
+.el-pcheck-sub { font-size: 15px; }
+.el-pcheck .el-link-btn { align-self: flex-start; }
+
+.el-range-wrap { padding-top: 22px; }
+.el-range { position: relative; height: 8px; border-radius: 4px; background: var(--el-fill); }
+.el-range-band { position: absolute; top: 0; bottom: 0; border-radius: 4px; background: var(--el-accent); opacity: 0.3; }
+.el-range-tick { position: absolute; top: -4px; width: 2px; height: 16px; margin-left: -1px; background: var(--el-accent); }
+.el-range-med { position: absolute; top: -22px; transform: translateX(-50%); font-size: 12px; font-weight: 600; color: var(--el-link); font-variant-numeric: tabular-nums; }
+.el-range-axis { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--el-text-2); }
+
+.el-pcheck-table { width: 100%; border-collapse: collapse; font-size: 15px; font-variant-numeric: tabular-nums; }
+.el-pcheck-table th { font-weight: 500; text-align: left; padding: 10px 0; border-top: 1px solid var(--el-hairline); }
+.el-pcheck-table thead th { font-size: 12px; font-weight: 600; color: var(--el-text-2); border-top: 0; padding: 0 0 8px; white-space: nowrap; }
+.el-pcheck-table td { padding: 10px 0 10px 12px; border-top: 1px solid var(--el-hairline); white-space: nowrap; }
+.el-pcheck-table .num { text-align: right; }
+.el-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.el-pcheck-change { margin-left: 4px; font-size: 12px; font-weight: 600; color: var(--el-text-2); }
+.el-pcheck-change.is-good { color: #1D7A3F; }
+.el-pcheck-rows { display: flex; flex-direction: column; }
+.el-pcheck-row { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; font-size: 17px; font-variant-numeric: tabular-nums; border-top: 1px solid var(--el-hairline); }
+.el-pcheck-row:first-child { border-top: 0; }
+.el-checks-sheet { display: flex; flex-direction: column; gap: 14px; padding: 4px 0 24px; }
+.el-checks-sheet .el-card { box-shadow: none; }
+.el-checks-lead { font-size: 15px; padding: 0 4px; }
+
+/* Grinder: "separated" chip */
+.el-chip-tag { display: inline-block; margin-left: 8px; padding: 2px 8px; border-radius: var(--el-r-pill); background: var(--el-fill); color: var(--el-text); font-size: 11px; font-weight: 600; white-space: nowrap; vertical-align: middle; }
+
 /* ---- tablet ------------------------------------------------------------------------------------ */
 
 @media (max-width: 1024px) {
@@ -357,6 +396,7 @@ label.el-btn-tinted:hover { background: var(--el-separator); }
   .el-forecast-grid { grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); }
   .el-diag-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .el-diag-tiles { gap: 12px; }
+  .el-checks-cols { gap: 24px; }
 }
 
 /* ---- phone ------------------------------------------------------------------------------------- */
