@@ -26,8 +26,16 @@ export function buildBins(xmin, xmax, xLog, bins) {
       n = Math.max(Math.ceil((xmax - xmin) / DEFAULT_LINEAR_BIN_SIZE), 10)
     }
   }
-  if (xLog) return logspace10(log10Accurate(xmin), log10Accurate(xmax), n)
-  return linspace(xmin, xmax, n)
+  const edges = xLog
+    ? logspace10(log10Accurate(xmin), log10Accurate(xmax), n)
+    : linspace(xmin, xmax, n)
+  // 10**log10(x) can round slightly away from x (engine dependent), leaving the smallest/largest
+  // value outside every bin. Pin the end edges to the exact range (mirrors plotting._build_bins).
+  if (n > 1) {
+    edges[0] = xmin
+    edges[n - 1] = xmax
+  }
+  return edges
 }
 
 /** main._value_range: [xmin, xmax] over all runs (NaNs ignored). */
