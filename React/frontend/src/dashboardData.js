@@ -1,11 +1,19 @@
 import {
   addDoc,
   collection,
+  deleteField,
   doc,
   getDocsFromServer,
   updateDoc,
 } from 'firebase/firestore'
 import { db } from './firestore'
+import { grindSettingToScore } from './grindCalibration'
+import {
+  buildForecastModel,
+  coffeeKey,
+  forecast,
+  sweepGrind,
+} from './forecastModel'
 
 export const MACRO_OPTIONS = Array.from({ length: 31 }, (_, index) => String(index + 1))
 export const MICRO_OPTIONS = 'ABCDEFGHI'.split('')
@@ -19,6 +27,20 @@ export const RATING_COLORS = {
 }
 export const TARGET_EXTRACTION_LOW = 18
 export const TARGET_EXTRACTION_HIGH = 22
+export const PH_MIN = 3.5
+export const PH_MAX = 8.0
+
+/** Validate a pH form value. Blank is allowed (pH is optional) and never defaulted. */
+export function parsePhInput(value) {
+  const text = value === null || value === undefined ? '' : String(value).trim()
+  if (!text) return { value: null, error: null }
+  const parsed = Number(text)
+  if (!Number.isFinite(parsed)) return { value: null, error: 'pH must be a number' }
+  if (parsed < PH_MIN || parsed > PH_MAX) {
+    return { value: null, error: `pH must be between ${PH_MIN.toFixed(1)} and ${PH_MAX.toFixed(1)}` }
+  }
+  return { value: parsed, error: null }
+}
 
 const SHOTS_COLLECTION = 'shots'
 const CACHE_KEY = 'espresso_dash_cached_shots_v1'
@@ -111,23 +133,6 @@ function splitGrindSetting(value) {
     MACRO_OPTIONS.includes(macro) ? macro : '10',
     MICRO_OPTIONS.includes(micro) ? micro : 'E',
   ]
-}
-
-function grindSettingToScore(value) {
-  const text = maybeTrim(value).toUpperCase()
-  const match = text.match(/^(\d{1,2})([A-I])(?:\.5)?$/)
-  if (!match) return null
-  const macro = Number(match[1])
-  const micro = MICRO_OPTIONS.indexOf(match[2])
-  const half = text.endsWith('.5') ? 0.5 : 0
-  return macro * 10 + micro + half
-}
-
-function scoreToGrindSetting(score) {
-  const safe = Math.max(10, Math.round(score))
-  const macro = Math.min(31, Math.max(1, Math.floor(safe / 10)))
-  const microIndex = Math.min(MICRO_OPTIONS.length - 1, Math.max(0, safe - macro * 10))
-  return `${macro}${MICRO_OPTIONS[microIndex]}`
 }
 
 function ratingToLabel(value) {
@@ -227,7 +232,7 @@ function normalizeShot(raw, id) {
 }
 
 function toFirestoreShot(raw) {
-  return {
+  const shot = {
     date: raw.date,
     spray: raw.spray,
     avgGrind: raw.avgGrind,
@@ -242,7 +247,6 @@ function toFirestoreShot(raw) {
     notes: raw.notes,
     continent: raw.continent,
     brix: raw.brix,
-    ph: raw.ph,
     tempC: raw.tempC,
     adjustmentTemp: raw.adjustmentTemp,
     adjustmentFactor: raw.adjustmentFactor,
@@ -255,6 +259,9 @@ function toFirestoreShot(raw) {
     rating: raw.rating,
     updatedAt: new Date().toISOString(),
   }
+  // pH is optional: leave the key out rather than storing null or a guess.
+  if (raw.ph !== null && raw.ph !== undefined) shot.ph = raw.ph
+  return shot
 }
 
 function cacheShots(shots) {
@@ -365,7 +372,7 @@ function buildDefaults(shots) {
       continent: placeholderText(latest?.continent),
       temp_c: latest?.tempC ?? 28,
       brix: latest?.brix ?? 10,
-      ph: latest?.ph ?? 5.2,
+      ph: '',
       dose: latest?.dose ?? 18,
       yield_grams: latest?.yieldGrams ?? 36,
       shot_time: latest?.time ?? 30,
@@ -705,7 +712,7 @@ function buildExperimentContext(form, shots) {
     roast: maybeTrim(form?.roast) || defaults.roast,
     tempC: toNumber(form?.temp_c) ?? defaults.temp_c,
     brix: toNumber(form?.brix) ?? defaults.brix,
-    ph: toNumber(form?.ph) ?? defaults.ph,
+    ph: toNumber(form?.ph),
     dose: toNumber(form?.dose) ?? defaults.dose,
     yieldGrams: toNumber(form?.yield_grams) ?? defaults.yield_grams,
     time: toNumber(form?.shot_time) ?? defaults.shot_time,
@@ -768,39 +775,11 @@ function enrichExperimentShots(shots) {
   }))
 }
 
-function linearSlope(shots) {
-  const points = shots.filter((shot) => Number.isFinite(shot.grindScore) && Number.isFinite(shot.extraction))
-  if (points.length < 2) return -0.03
-  const meanX = average(points.map((point) => point.grindScore), 0)
-  const meanY = average(points.map((point) => point.extraction), 0)
-  let numerator = 0
-  let denominator = 0
-  points.forEach((point) => {
-    numerator += (point.grindScore - meanX) * (point.extraction - meanY)
-    denominator += (point.grindScore - meanX) ** 2
-  })
-  if (!denominator) return -0.03
-  return numerator / denominator
-}
-
-function ratingProbabilities(similar) {
-  const total = similar.reduce((sum, item) => sum + item.weight, 0) || 1
-  const lookup = { 0: 0, 1: 0, 2: 0 }
-  similar.forEach((item) => {
-    lookup[item.shot.rating] += item.weight
-  })
-  return {
-    bad: lookup[0] / total,
-    good: lookup[1] / total,
-    great: lookup[2] / total,
-  }
-}
-
 function coffeeLabel(shot) {
   return [shot.roaster, shot.region, shot.variety].filter(Boolean).join(' • ') || shot.roaster || 'Unknown Coffee'
 }
 
-export function buildExperimentPayload(shots, form = {}) {
+export function buildExperimentPayload(shots, form = {}, { calibration = null } = {}) {
   const enriched = enrichExperimentShots(shots)
   if (enriched.length < 8) {
     return {
@@ -819,32 +798,41 @@ export function buildExperimentPayload(shots, form = {}) {
     .sort((a, b) => b.weight - a.weight)
     .slice(0, 12)
 
-  const extraction = similar.length
-    ? similar.reduce((sum, item) => sum + (item.shot.extraction ?? 0) * item.weight, 0) / similar.reduce((sum, item) => sum + item.weight, 0)
-    : average(enriched.map((shot) => shot.extraction), 20)
-  const probabilities = ratingProbabilities(similar)
-  const predictedRating = probabilities.great >= Math.max(probabilities.good, probabilities.bad)
-    ? 'Great'
-    : (probabilities.good >= probabilities.bad ? 'Good' : 'Bad')
+  const model = buildForecastModel(shots, { calibration })
+  if (!model.available) {
+    return {
+      available: false,
+      message: model.reason,
+      defaults: buildDefaults(enriched).latest_values,
+    }
+  }
+  const planned = {
+    coffee: coffeeKey(context),
+    grindSetting: context.grindSetting,
+    dose: context.dose,
+    yieldGrams: context.yieldGrams,
+    ph: context.ph,
+  }
+  const result = forecast(model, planned)
+
+  // forecast() is non-null whenever the model is available (checked above).
+  const extraction = result.extraction
+  const probabilities = result.probabilities
+  const predictedRating = result.ratingLabel
   const noveltyScore = similar.length ? Math.max(0, 1 - (similar[0].weight / 20)) : 1
   const noveltyFlag = noveltyScore > 0.45
 
-  const slope = linearSlope(similar.map((item) => item.shot))
-  const baseGrindScore = context.grindScore ?? average(enriched.map((shot) => shot.grindScore), 100)
-  const sweep = Array.from({ length: 13 }, (_, index) => baseGrindScore - 6 + index)
-    .map((score) => {
-      const predictedExtraction = extraction + slope * (score - baseGrindScore)
-      const targetDistance = Math.abs(predictedExtraction - 20)
-      const greatProbability = Math.max(0.02, probabilities.great + (2.2 - targetDistance) * 0.05)
-      const goodProbability = Math.max(0.05, probabilities.good + (2.8 - targetDistance) * 0.04)
-      return {
-        'Grind Score': round(score, 1),
-        'Grind Setting': scoreToGrindSetting(score),
-        'Predicted Extraction': round(predictedExtraction, 2),
-        'Great Probability': Math.min(0.98, greatProbability),
-        'Good Probability': Math.min(0.98, goodProbability),
-      }
-    })
+  const sweep = sweepGrind(model, planned, { span: 6 }).map((row) => ({
+    'Grind Index': row.index,
+    'Grind Score': grindSettingToScore(row.setting),
+    'Grind Setting': row.setting,
+    'Grind µm (est.)': row.um === null ? null : round(row.um, 0),
+    'Predicted Extraction': round(row.extraction, 2),
+    Low: row.low === null ? null : round(row.low, 2),
+    High: row.high === null ? null : round(row.high, 2),
+    'Great Probability': row.great,
+    'Good Probability': row.good,
+  }))
 
   const bestCandidates = [...sweep]
     .sort((a, b) => (
@@ -852,13 +840,7 @@ export function buildExperimentPayload(shots, form = {}) {
       || b['Great Probability'] - a['Great Probability']
     ))
     .slice(0, 8)
-    .map((row) => ({
-      'Grind Setting': row['Grind Setting'],
-      'Grind Score': row['Grind Score'],
-      'Predicted Extraction': row['Predicted Extraction'],
-      'Great Probability': row['Great Probability'],
-      'Good Probability': row['Good Probability'],
-    }))
+    .map(({ 'Grind Score': _score, ...row }) => row)
 
   const successRows = similar
     .filter((item) => item.shot.rating >= 1 && item.shot.extraction >= TARGET_EXTRACTION_LOW && item.shot.extraction <= TARGET_EXTRACTION_HIGH)
@@ -900,12 +882,21 @@ export function buildExperimentPayload(shots, form = {}) {
     ph: context.ph,
     metrics: {
       rows: enriched.length,
-      extraction_r2: round(Math.max(0.2, 0.65 - noveltyScore * 0.3), 2),
-      extraction_mae: round(Math.max(0.2, 1.8 + noveltyScore), 2),
-      rating_balanced_accuracy: round(Math.max(0.35, 0.72 - noveltyScore * 0.2), 2),
+      backtest: model.backtest
+        ? {
+          mae: round(model.backtest.model.mae, 2),
+          baselineMae: round(model.backtest.baseline.mae, 2),
+          within1: round(model.backtest.model.within1, 3),
+          evaluated: model.backtest.evaluated,
+        }
+        : null,
     },
     prediction: {
       extraction: round(extraction, 2),
+      low: result.low === null ? null : round(result.low, 2),
+      high: result.high === null ? null : round(result.high, 2),
+      interval: result.interval,
+      features_used: result.featuresUsed,
       predicted_rating_label: predictedRating,
       great_probability: probabilities.great,
       good_probability: probabilities.good,
@@ -947,7 +938,9 @@ export async function addShotToFirestore({ shots, fields, carryForward, carrySho
   const dose = toNumber(fields.dose) ?? defaults.dose
   const yieldGrams = toNumber(fields.yield_grams) ?? defaults.yield_grams
   const time = toNumber(fields.shot_time) ?? defaults.shot_time
-  const ph = toNumber(fields.ph)
+  const phResult = parsePhInput(fields.ph)
+  if (phResult.error) throw new Error(phResult.error)
+  const ph = phResult.value
   const adjustment = calculateAdjustmentFactor(tempC)
   const tds = round(calculateTds(brix, adjustment.factor), 2)
   const extraction = round(calculateExtraction(tds, yieldGrams, dose), 2)
@@ -1006,9 +999,13 @@ export async function updateShotCellInFirestore({ shots, rowId, column, value })
   } else if (field === 'rating') {
     if (!RATING_LABELS.includes(text)) throw new Error('Rating Label must be Bad, Good, or Great.')
     next.rating = ratingToNumber(text)
-  } else if (['dose', 'yieldGrams', 'time', 'brix', 'ph', 'tempC', 'tds', 'extraction'].includes(field)) {
+  } else if (field === 'ph') {
+    const phResult = parsePhInput(text)
+    if (phResult.error) throw new Error(phResult.error)
+    next.ph = phResult.value
+  } else if (['dose', 'yieldGrams', 'time', 'brix', 'tempC', 'tds', 'extraction'].includes(field)) {
     const numeric = toNumber(text)
-    if (numeric === null && !['ph', 'tds', 'extraction'].includes(field)) {
+    if (numeric === null && !['tds', 'extraction'].includes(field)) {
       throw new Error(`${column} must be numeric.`)
     }
     next[field] = numeric
@@ -1028,5 +1025,8 @@ export async function updateShotCellInFirestore({ shots, rowId, column, value })
     }
   }
 
-  await updateDoc(doc(db, SHOTS_COLLECTION, rowId), toFirestoreShot(next))
+  const payload = toFirestoreShot(next)
+  // A blank pH removes the stored value instead of leaving the old one in place.
+  if (field === 'ph' && (next.ph === null || next.ph === undefined)) payload.ph = deleteField()
+  await updateDoc(doc(db, SHOTS_COLLECTION, rowId), payload)
 }
