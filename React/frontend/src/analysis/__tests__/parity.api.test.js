@@ -6,9 +6,18 @@ import { createEngine } from '../engine.js'
 import { approx, caseNames, expectClose, expectSummary, fnvBytes, inflateBlue, layerInfo, loadCase } from './fixtureUtils.js'
 
 const STAT_RTOL = 1e-9
-// Tie flags are not recorded for API cases (the server dataset is not exposed), so assume ties: the
-// dv / median keys get a loose 1e-4 band instead of the exact stable-sort comparison used in parity.summary.
-const API_TIE = { dv: true, number: true, loose: 1e-4 }
+// Each recorded step carries `tie_sensitive` ({dv, number}, plus `stable` on analyze steps): numpy's unstable
+// argsort orders equal diameters differently from the JS stable sort, which moves weighted percentiles by up
+// to ~1e-4 when those diameters carry unequal (edge) weights. Such steps get a 1e-3 band on the affected keys.
+const TIE_LOOSE = 1e-3
+const tieOf = (step, strictSummary = false) => (strictSummary ? step.tie_sensitive : { ...step.tie_sensitive, stable: undefined, loose: TIE_LOOSE })
+const isTied = (step) => step.tie_sensitive.dv || step.tie_sensitive.number
+const maxAbs = (o) => (typeof o === 'number' ? Math.abs(o) : o && typeof o === 'object' ? Math.max(0, ...Object.values(o).map(maxAbs)) : 0)
+/** Tolerance for distribution statistics. Differences such as `p75 - median` amplify a tie-induced 1e-4 shift in
+ *  a percentile, so tied steps also get an absolute allowance of 1e-3 of the largest statistic. */
+const statTol = (step, py) => (isTied(step)
+  ? { rtol: TIE_LOOSE, atol: TIE_LOOSE * maxAbs({ ...py, series: undefined }) }
+  : { rtol: STAT_RTOL, atol: 0 })
 
 /** Replace "$image" / "$step:K" placeholders by the real ids. */
 function resolve(body, imageId, ids) {
@@ -52,27 +61,27 @@ function expectSeries(js, py, label) {
   })
 }
 
-function expectHistogram(js, py, label) {
+function expectHistogram(js, py, label, tol = { rtol: STAT_RTOL, atol: 0 }) {
   const { series, histogram_b64: _ignored, ...jsRest } = js
   const { series: pySeries, ...pyRest } = py
   expect(Object.keys(jsRest).sort(), `${label} keys`).toEqual(Object.keys(pyRest).sort())
   expectSeries(series, pySeries, `${label} series`)
   for (const k of ['unit', 'axis_label', 'scale']) expect(js[k], `${label} ${k}`).toBe(py[k])
   const { unit, axis_label, scale, ...stats } = pyRest
-  expectClose(Object.fromEntries(Object.keys(stats).map((k) => [k, jsRest[k]])), stats, { rtol: STAT_RTOL, label })
+  expectClose(Object.fromEntries(Object.keys(stats).map((k) => [k, jsRest[k]])), stats, { ...tol, label })
 }
 
-function expectCompare(js, py, label) {
+function expectCompare(js, py, label, tol = { rtol: STAT_RTOL, atol: 0 }) {
   const { series, histogram_b64: _ignored, per_run, combined, min_diameter_um_applied, ...jsRest } = js
   expect(Object.keys(js).filter((k) => k !== 'histogram_b64').sort(), `${label} keys`).toEqual(Object.keys(py).sort())
   expectSeries(series, py.series, `${label} series`)
   for (const k of ['unit', 'axis_label', 'scale']) expect(jsRest[k], `${label} ${k}`).toBe(py[k])
   expect(min_diameter_um_applied, `${label} min_diameter_um_applied`).toBe(py.min_diameter_um_applied)
-  expectClose(per_run, py.per_run, { rtol: STAT_RTOL, label: `${label} per_run`, exactKeys: ['label'] })
-  expectClose(combined, py.combined, { rtol: STAT_RTOL, label: `${label} combined` })
+  expectClose(per_run, py.per_run, { ...tol, label: `${label} per_run`, exactKeys: ['label'] })
+  expectClose(combined, py.combined, { ...tol, label: `${label} combined` })
 }
 
-function expectAnalyze(js, py, label) {
+function expectAnalyze(js, py, label, tie) {
   for (const k of ['nclusters', 'analysis_scale', 'width', 'height']) expect(js[k], `${label} ${k}`).toBe(py[k])
   expect(approx(js.background_median, py.background_median, 1e-9), `${label} background_median js=${js.background_median} py=${py.background_median}`).toBe(true)
   expect(approx(js.pixel_scale, py.pixel_scale, 1e-12), `${label} pixel_scale`).toBe(true)
@@ -84,7 +93,7 @@ function expectAnalyze(js, py, label) {
   }
   expectLayer(js.threshold_layer, py.threshold_layer, `${label} threshold_layer`)
   expectLayer(js.cluster_layer, py.cluster_layer, `${label} cluster_layer`)
-  expectSummary(js.summary, py.summary, API_TIE, label)
+  expectSummary(js.summary, py.summary, tie, label)
 }
 
 describe('API replay matches the Python server', () => {
@@ -123,16 +132,16 @@ describe('API replay matches the Python server', () => {
         const py = step.response
         if (step.op === 'analyze') {
           ids[i] = js.analysis_id
-          expectAnalyze(js, py, label)
+          expectAnalyze(js, py, label, tieOf(step, true))
         } else if (step.op === 'erase') {
           expect(js.removed_ids, `${label} removed_ids`).toEqual(py.removed_ids)
           expect(js.nclusters, `${label} nclusters`).toBe(py.nclusters)
           expectLayer(js.cluster_layer, py.cluster_layer, `${label} cluster_layer`)
-          expectSummary(js.summary, py.summary, API_TIE, label)
+          expectSummary(js.summary, py.summary, tieOf(step), label)
         } else if (step.op === 'histogram') {
-          expectHistogram(js, py, label)
+          expectHistogram(js, py, label, statTol(step, py))
         } else {
-          expectCompare(js, py, label)
+          expectCompare(js, py, label, statTol(step, py))
         }
       })
     })

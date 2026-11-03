@@ -182,6 +182,11 @@ function indexGridFor(size) {
   return indexGridBuf
 }
 
+/** Free the module-level index grid (up to 4 bytes per image pixel) once analysis is done. */
+export function releaseDetectBuffers() {
+  indexGridBuf = new Int32Array(0)
+}
+
 function emptyDataset(settings, meta = {}) {
   return makeDataset({ n: 0 }, { pixel_scale: settings.pixel_scale, label: 'Current Data', meta })
 }

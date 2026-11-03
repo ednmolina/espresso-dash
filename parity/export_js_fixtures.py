@@ -402,6 +402,12 @@ def modern_case(i: int) -> dict:
 _client = None
 
 
+def main_module():
+    get_client()
+    import main
+    return main
+
+
 def get_client():
     global _client
     if _client is None:
@@ -476,6 +482,8 @@ def api_case(i: int) -> dict:
     steps: list = []
     ids: dict = {}   # step index -> analysis_id
 
+    ties: dict = {}  # analyze step index -> tie_flags of the server's stored dataset
+
     def analyze(**kw):
         body = {"image_id": image_id, "analysis_scale_pct": scale_pct, "reference_points": ref_pts,
                 "reference_physical_mm": ref_mm, **model, **extra, **kw}
@@ -483,12 +491,18 @@ def api_case(i: int) -> dict:
             body["polygon_points"] = poly
         r = _record(client, steps, "analyze", "/analyze", body)
         if r.status_code == 200:
-            ids[len(steps) - 1] = r.json()["analysis_id"]
+            k = len(steps) - 1
+            ids[k] = r.json()["analysis_id"]
+            ties[k] = tie_flags(main_module()._load_result(ids[k]).dataset)
+            steps[-1]["tie_sensitive"] = ties[k]
         return len(steps) - 1
 
     def post(op, path, ref, **kw):
         body = {"image_id": ids[ref], **kw}
-        return _record(client, steps, op, path, body, ref=ref)
+        r = _record(client, steps, op, path, body, ref=ref)
+        # subsets of the analysed dataset: ties can only come from the full dataset's ties
+        steps[-1]["tie_sensitive"] = {k: ties[ref][k] for k in ("dv", "number")}
+        return r
 
     a0 = analyze()
     if i == 0:
@@ -524,7 +538,8 @@ def api_case(i: int) -> dict:
         r = client.post("/histogram/compare", json={"runs": runs, "include_png": False, **rb})
         assert r.status_code == 200, r.text
         shown = [dict(run, image_id=f"$step:{ref}") for run, ref in zip(runs, (a0, a1))]
-        steps.append({"op": "compare", "body": {"runs": shown, "include_png": False, **rb}, "response": r.json()})
+        steps.append({"op": "compare", "body": {"runs": shown, "include_png": False, **rb}, "response": r.json(),
+                      "tie_sensitive": {k: ties[a0][k] or ties[a1][k] for k in ("dv", "number")}})
 
     # --- normalise responses: drop PNG payloads / ids, hash the index layers ---
     for step in steps:

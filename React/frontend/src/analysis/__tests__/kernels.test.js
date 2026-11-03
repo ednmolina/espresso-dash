@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   growCluster, smoothedMax, pointsAlongPolygon, outlineMaskFromClusters, polygonMask,
-  filterClusterPixels, detectCore, stableArgsortU8,
+  filterClusterPixels, detectCore, stableArgsortU8, setBatchSmallRejects,
 } from '../kernels.js'
 import { pow2, powGlibc, fma, fmaExact } from '../glibcPow.js'
 import { makeDataset, selectDataset, filterDatasetByClusterIds, dropPixels } from '../dataset.js'
@@ -255,6 +255,46 @@ describe('growCluster / detectCore vs Python (REF)', () => {
     expect(Array.from(ig)).toEqual(Array.from(before))
     expect(seen.length).toBeGreaterThanOrEqual(1)
     expect(seen[0][1]).toBe(n)
+  })
+})
+
+describe('detectCore small-component shortcut', () => {
+  it('gives identical clusters, ids and pixels with and without the shortcut', () => {
+    // random speckle: many small components, some above and some below min_surface
+    const h = 90
+    const w = 110
+    let st = 2024
+    const rnd = () => { st = (Math.imul(st, 1664525) + 1013904223) >>> 0; return st / 4294967296 }
+    const blue = new Uint8Array(h * w)
+    for (let i = 0; i < blue.length; i++) blue[i] = rnd() < 0.42 ? 30 + Math.floor(rnd() * 60) : 200
+    const rows = []
+    const cols = []
+    for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) if (blue[r * w + c] < 120) { rows.push(r); cols.push(c) }
+    const n = rows.length
+    const order = stableArgsortU8(Uint8Array.from(rows, (r, i) => blue[r * w + cols[i]]), n)
+    const rowPos = Int32Array.from(order, (i) => rows[i])
+    const colPos = Int32Array.from(order, (i) => cols[i])
+    const bs = Uint8Array.from(order, (i) => blue[rows[i] * w + cols[i]])
+    const ig = new Int32Array(h * w).fill(-1)
+    for (let i = 0; i < n; i++) ig[rowPos[i] * w + colPos[i]] = i
+    for (const quick of [true, false]) {
+      for (const [maxAxis, minSurface] of [[100, 12], [6, 12], [100, 40], [9, 3]]) {
+        const run = (batch) => {
+          setBatchSmallRejects(batch)
+          try { return detectCore(ig, h, w, rowPos, colPos, bs, n, 200, 0.4, 0.35, 3, maxAxis, minSurface, quick, null) } finally { setBatchSmallRejects(true) }
+        }
+        const a = run(true)
+        const b = run(false)
+        expect(Array.from(a.ids)).toEqual(Array.from(b.ids))
+        expect(Array.from(a.offsets)).toEqual(Array.from(b.offsets))
+        expect(Array.from(a.stats)).toEqual(Array.from(b.stats))
+        expect(fnv(a.pixRow)).toBe(fnv(b.pixRow))
+        expect(fnv(a.pixCol)).toBe(fnv(b.pixCol))
+        expect(a.ids.length).toBeGreaterThan(0)
+        // ids count every seed including rejected ones, so they are not contiguous
+        expect(a.ids[a.ids.length - 1]).toBeGreaterThan(a.ids.length)
+      }
+    }
   })
 })
 

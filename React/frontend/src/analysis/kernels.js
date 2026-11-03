@@ -22,6 +22,8 @@ export function stableArgsortU8(values, n) {
 
 // ---------------------------------------------------------------- flood fill
 const neigh = new Int32Array(4)
+// true when the last growCluster call skipped an open neighbour because of the radius cut
+let lastGrowExcluded = false
 
 /**
  * 4-connected flood fill from `current` over open thresholded pixels within
@@ -39,6 +41,7 @@ export function growCluster(indexGrid, nRows, nCols, counted, rowPos, colPos, cu
   let nOut = 1
   let head = 0
   let tail = 1
+  let excluded = false
   while (head < tail) {
     const p = queue[head++]
     const r = rowPos[p]
@@ -56,7 +59,10 @@ export function growCluster(indexGrid, nRows, nCols, counted, rowPos, colPos, cu
       if (q < 0 || counted[q] !== 0 || visitStamp[q] === stamp) continue
       const dr = r0 - rowPos[q]
       const dc = c0 - colPos[q]
-      if (dr * dr + dc * dc > maxAxisSq) continue
+      if (dr * dr + dc * dc > maxAxisSq) {
+        excluded = true
+        continue
+      }
       neigh[k++] = q
     }
     // insertion sort (k <= 4) so neighbours are appended in index order
@@ -76,6 +82,7 @@ export function growCluster(indexGrid, nRows, nCols, counted, rowPos, colPos, cu
       queue[tail++] = q
     }
   }
+  lastGrowExcluded = excluded
   return nOut
 }
 
@@ -529,6 +536,12 @@ export function filterClusterPixels(ci, n, rowPos, colPos, blue, bgMedian, refTh
 }
 
 // ---------------------------------------------------------------- driver
+let BATCH_SMALL_REJECTS = true
+/** Test hook: disable the small-component shortcut in detectCore (results must not change). */
+export function setBatchSmallRejects(value) {
+  BATCH_SMALL_REJECTS = !!value
+}
+
 function growI32(a, size) {
   const b = new Int32Array(size)
   b.set(a)
@@ -569,15 +582,28 @@ export function detectCore(indexGrid, nRows, nCols, rowPos, colPos, blue, total,
   let nPix = 0
   let nextOpen = 0
 
+  let nextProgress = 0
   for (let clusterId = 0; clusterId < total; clusterId++) {
-    if (onProgress && (clusterId & 0xffff) === 0) onProgress(nextOpen, total)
-    while (nextOpen < total && counted[nextOpen] !== 0) nextOpen++
+    if (onProgress && clusterId >= nextProgress) {
+      onProgress(nextOpen, total)
+      nextProgress = clusterId + 65536
+    }
+    // counted: 1 = taken by a cluster / rejected seed, 2 = pixel of a component already known to be
+    // smaller than minSurface; reaching it still consumes a seed id exactly as Python does
+    // (each of its pixels would become a seed whose flood is smaller than minSurface).
+    while (nextOpen < total && counted[nextOpen] !== 0) {
+      if (counted[nextOpen] === 2) clusterId++
+      nextOpen++
+    }
     if (nextOpen >= total) break
     const current = nextOpen
     const nFound = growCluster(indexGrid, nRows, nCols, counted, rowPos, colPos, current,
       maxAxisSq, visitStamp, clusterId + 1, out, out)
     if (nFound < minSurface) {
       counted[current] = 1
+      // If the radius cut excluded nothing, the flood is the whole open component, so every
+      // later flood inside it is smaller still: reject it in one go (python re-floods it per pixel).
+      if (BATCH_SMALL_REJECTS && !lastGrowExcluded) for (let i = 1; i < nFound; i++) counted[out[i]] = 2
       continue
     }
     const ci = out // positions of the cluster, BFS order
